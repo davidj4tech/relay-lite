@@ -79,6 +79,10 @@ KEEP_DAYS="${RUNLET_KEEP_DAYS:-30}"
 LAST_PRUNE=-100000
 LAST_STALE=-100000
 LOAD_HELD=0
+# The serial queue's one lane: pid of the subshell running the current
+# foreground row, or empty. poll() starts rows in it without waiting, so the
+# loop keeps polling (and starting background rows) while it is busy.
+FG_PID=
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/runlet"
 SEEN="${RUNLET_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/runlet/nonces}"
 
@@ -303,8 +307,14 @@ reload_tunables() {
   if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ && "$v" != "$LOAD_MAX" ]]; then log "RUNLET_LOAD_MAX now $v (was $LOAD_MAX)"; LOAD_MAX="$v"; fi
 }
 
+# Is the foreground lane still running its row? A detach ends the lane's
+# subshell early (the watching moves to a background copy), freeing it.
+fg_busy() { [[ -n "$FG_PID" ]] && jobs -rp | grep -qxF -- "$FG_PID"; }
+# Background rows running now: every running child except the lane.
+bg_running() { jobs -rp | grep -cvxF -- "${FG_PID:-none}"; }
+
 poll() {
-  local rows load
+  local rows load where
   reload_tunables
   if [[ "$LOAD_MAX" != 0 ]]; then
     load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
@@ -317,7 +327,11 @@ poll() {
   elif (( LOAD_HELD )); then
     log "load ceiling removed — resuming"; LOAD_HELD=0
   fi
-  rows=$(d1 "SELECT id, command, sig, nonce, COALESCE(background, 0) AS background FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
+  # While the lane is busy only background rows can start, so ask only for
+  # those; otherwise five queued commands could hide one behind them.
+  where="status = 'pending'"
+  (( PARALLEL == 1 )) && fg_busy && where="$where AND background = 1"
+  rows=$(d1 "SELECT id, command, sig, nonce, COALESCE(background, 0) AS background FROM commands WHERE $where ORDER BY id LIMIT 5;") || return 1
   local n; n=$(printf '%s' "$rows" | jq 'length')
   (( n > 0 )) || return 0
   local i bg id sig nonce cmd
@@ -333,7 +347,7 @@ poll() {
       # Asked to run alongside the queue (run_command background=true). Its
       # own cap, RUNLET_BACKGROUND_MAX, independent of RUNLET_PARALLEL: the
       # queue stays serial while a long job runs beside it.
-      while (( $(jobs -rp | wc -l) >= BACKGROUND_MAX )); do sleep 0.5; done
+      while (( $(bg_running) >= BACKGROUND_MAX )); do sleep 0.5; done
       run_one "$id" "$cmd" "$sig" "$nonce" bg &
     elif (( PARALLEL > 1 )); then
       # Hold here while the cap is full. A row another job already claimed
@@ -341,7 +355,11 @@ poll() {
       while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 0.5; done
       run_one "$id" "$cmd" "$sig" "$nonce" bg &
     else
-      run_one "$id" "$cmd" "$sig" "$nonce" fg
+      # Serial: one foreground row at a time, oldest first. A busy lane
+      # leaves this row (and every later foreground one) for a later poll.
+      fg_busy && continue
+      run_one "$id" "$cmd" "$sig" "$nonce" fg &
+      FG_PID=$!
     fi
   done
   # Trim the nonce file from the one place that is never concurrent.
