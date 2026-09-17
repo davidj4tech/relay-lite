@@ -97,10 +97,15 @@ const TOOLS = [
     name: 'get_result',
     description:
       'Fetch the status and output of a command queued earlier, by the id run_command ' +
-      'returned. Status pending or running means it has not finished; call again later.',
+      'returned. Pass `wait` to block up to that many seconds until it finishes, so a ' +
+      'long job needs one call rather than a polling loop; without it you get the ' +
+      'current state at once. Status pending or running means it has not finished.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'number', description: 'Row id from run_command.' } },
+      properties: {
+        id: { type: 'number', description: 'Row id from run_command.' },
+        wait: { type: 'number', description: 'Seconds to wait for it to finish (default 0: answer now; max 120).' },
+      },
       required: ['id'],
     },
   },
@@ -129,7 +134,28 @@ function toolText(id: unknown, text: string, isError = false): Response {
   return rpc(id, { content: [{ type: 'text', text }], isError })
 }
 
-async function enqueue(env: Env, command: string, waitSeconds: number): Promise<Response | { row: Row; timedOut: boolean }> {
+// Poll a row until it is terminal or the wait runs out. Shared by
+// run_command and get_result, so "wait for it" means the same thing in
+// both: 250 ms growing to 2 s between looks, and the wait is a ceiling.
+async function awaitRow(env: Env, id: number, waitSeconds: number): Promise<{ row: Row | null; timedOut: boolean }> {
+  const deadline = Date.now() + waitSeconds * 1000
+  let delay = 250
+  for (;;) {
+    const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(id).first<Row>()
+    if (row && TERMINAL.includes(row.status)) return { row, timedOut: false }
+    if (Date.now() >= deadline) return { row, timedOut: true }
+    await new Promise((r) => setTimeout(r, Math.min(delay, Math.max(0, deadline - Date.now()))))
+    delay = Math.min(Math.round(delay * 1.5), 2000)
+  }
+}
+
+function clampWait(env: Env, asked: unknown, fallback: number): number {
+  const max = Number(env.RELAY_WAIT_MAX ?? 120)
+  const n = Number(asked ?? fallback)
+  return Math.min(Math.max(Number.isFinite(n) ? n : fallback, 0), max)
+}
+
+async function enqueue(env: Env, command: string, waitSeconds: number): Promise<{ row: Row; timedOut: boolean }> {
   const nonce = randomHex(16)
   const sig = await hmacHex(env.RELAY_HMAC_KEY, `${nonce}\n${command}`)
   const ins = await env.DB.prepare(
@@ -139,15 +165,8 @@ async function enqueue(env: Env, command: string, waitSeconds: number): Promise<
     .bind(command, sig, nonce)
     .run()
   const id = Number(ins.meta.last_row_id)
-  const deadline = Date.now() + waitSeconds * 1000
-  let delay = 250
-  for (;;) {
-    const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(id).first<Row>()
-    if (row && TERMINAL.includes(row.status)) return { row, timedOut: false }
-    if (Date.now() >= deadline) return { row: row ?? { id, status: 'pending', exit_code: null, output: null }, timedOut: true }
-    await new Promise((r) => setTimeout(r, Math.min(delay, Math.max(0, deadline - Date.now()))))
-    delay = Math.min(Math.round(delay * 1.5), 2000)
-  }
+  const r = await awaitRow(env, id, waitSeconds)
+  return { row: r.row ?? { id, status: 'pending', exit_code: null, output: null }, timedOut: r.timedOut }
 }
 
 export default {
@@ -188,20 +207,20 @@ export default {
           const command = String(args.command ?? '')
           if (!command.trim()) return toolText(id, 'run_command needs a command.', true)
           if (command.length > MAX_COMMAND_CHARS) return toolText(id, `Command is ${command.length} characters; the limit is ${MAX_COMMAND_CHARS}.`, true)
-          const def = Number(env.RELAY_WAIT_DEFAULT ?? 30)
-          const max = Number(env.RELAY_WAIT_MAX ?? 120)
-          const asked = Number(args.wait ?? def)
-          const wait = Math.min(Math.max(Number.isFinite(asked) ? asked : def, 0), max)
+          const wait = clampWait(env, args.wait, Number(env.RELAY_WAIT_DEFAULT ?? 30))
           const r = await enqueue(env, command, wait)
-          if (r instanceof Response) return r
           return toolText(id, render(r.row, r.timedOut), !r.timedOut && ['error', 'rejected', 'timeout'].includes(r.row.status))
         }
         if (name === 'get_result') {
           const rid = Number(args.id)
           if (!Number.isInteger(rid)) return toolText(id, 'get_result needs a numeric id.', true)
-          const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(rid).first<Row>()
-          if (!row) return toolText(id, `No command #${rid}.`, true)
-          return toolText(id, render(row, !TERMINAL.includes(row.status)), ['error', 'rejected', 'timeout'].includes(row.status))
+          // Cece's suggestion (2026-09-17): let a check-back wait too, so one
+          // call returns the moment the job finishes instead of the caller
+          // polling by hand. Default 0 keeps the old immediate answer.
+          const wait = clampWait(env, args.wait, 0)
+          const r = await awaitRow(env, rid, wait)
+          if (!r.row) return toolText(id, `No command #${rid}.`, true)
+          return toolText(id, render(r.row, r.timedOut), ['error', 'rejected', 'timeout'].includes(r.row.status))
         }
         return rpcError(id, -32601, `unknown tool ${JSON.stringify(name)}`)
       }
