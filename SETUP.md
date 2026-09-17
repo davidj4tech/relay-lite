@@ -80,6 +80,16 @@ In Claude (web or app): **Settings → Connectors → Add custom connector**.
 Paste the address, choose **no authentication**, save. Then in a chat, ask
 it to run a command, for example "run `uname -a` on my machine".
 
+The assistant learns how the tools work from the tools themselves; nothing
+more is required. If you want it to behave a particular way, put a note in
+the chat's project instructions or custom instructions. A sensible one:
+
+> You can run shell commands on my computer with the relay-lite connector.
+> Commands run as me, one at a time, in a fresh shell each time. Prefer
+> read-only commands; ask before anything that changes or deletes files.
+> For long jobs, pass a short wait and fetch the result later, or
+> background the job and read its log. Keep output small (head, tail, grep).
+
 ## Afterwards
 
 - The runner keeps working after reboots; nothing to start by hand.

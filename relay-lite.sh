@@ -19,6 +19,7 @@
 #     RELAY_POLL             seconds between polls (default 5)
 #     RELAY_CMD_TIMEOUT      seconds a command may run (default 600)
 #     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
+#     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
 #
 # This is github.com/davidj4tech/tmux-relay's d1-runner with everything that is not "run a command
 # and write the result" removed: no kinds, no panes, no Claude, no mailbox.
@@ -36,6 +37,12 @@ KEY_FILE="${RELAY_KEY_FILE:-$CONF_DIR/relay.key}"
 POLL="${RELAY_POLL:-5}"
 CMD_TIMEOUT="${RELAY_CMD_TIMEOUT:-600}"
 MAX_OUTPUT="${RELAY_MAX_OUTPUT:-60000}"
+# 1 = serial, the default: each command finishes before the next starts, so
+# nothing interleaves and a long job is easy to spot. Higher = that many at
+# once, each in its own process; outputs then land in whatever order they
+# finish, and jobs compete for the machine. Set it knowingly.
+PARALLEL="${RELAY_PARALLEL:-1}"
+[[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || PARALLEL=1
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
 
 log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
@@ -94,7 +101,9 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
               --command "UPDATE commands SET status = 'running', updated_at = datetime('now') WHERE id = $id AND status = 'pending';" 2>/dev/null \
             | jq -r '.[0].meta.changes // 0' 2>/dev/null)
   [[ "$claimed" == 1 ]] || { log "#$id: claimed by someone else"; return; }
-  printf '%s\n' "$nonce" >> "$SEEN"; tail -n 5000 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
+  # Append only here: parallel jobs may write at once, and appends are safe
+  # where a rewrite is not. The file is trimmed by poll(), single-threaded.
+  printf '%s\n' "$nonce" >> "$SEEN"
 
   log "#$id: running: ${command:0:80}"
   out=$(timeout --kill-after=10 "$CMD_TIMEOUT" bash -lc "$command" 2>&1 </dev/null | head -c "$MAX_OUTPUT"; exit "${PIPESTATUS[0]}")
@@ -116,11 +125,23 @@ poll() {
   (( n > 0 )) || return 0
   local i
   for (( i = 0; i < n; i++ )); do
-    run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-            "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")"
+    if (( PARALLEL > 1 )); then
+      # Hold here while the cap is full. A row another job already claimed
+      # while we waited is refused by the claim's status check.
+      while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 0.5; done
+      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" &
+    else
+      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")"
+    fi
   done
+  # Trim the nonce file from the one place that is never concurrent.
+  if [[ -s "$SEEN" ]] && (( $(wc -l < "$SEEN") > 6000 )); then
+    tail -n 5000 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
+  fi
 }
 
-if [[ "${1:-}" == "--once" ]]; then poll; exit $?; fi
-log "polling '$DB' every ${POLL}s; commands run as $(id -un) with a ${CMD_TIMEOUT}s limit"
+if [[ "${1:-}" == "--once" ]]; then poll; rc=$?; wait; exit $rc; fi
+log "polling '$DB' every ${POLL}s; commands run as $(id -un) with a ${CMD_TIMEOUT}s limit$( (( PARALLEL > 1 )) && echo ", up to $PARALLEL at once" )"
 while :; do poll; sleep "$POLL"; done

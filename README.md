@@ -59,6 +59,12 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   runner refuses a row that does not verify, and a nonce it has seen before.
 - **Commands run as you**, with `bash -lc`, a 600 s timeout and 60 KB of
   output kept.
+- **One at a time, by default.** The runner finishes each command before it
+  starts the next, so a long job holds the queue behind it and nothing
+  interleaves. `RELAY_PARALLEL=4` in `~/.config/relay-lite/env` runs up to
+  four at once, each in its own process; results then land in whatever
+  order they finish. A command can also background its own work (`nohup …
+  &`, writing to a log) and return at once; a later command reads the log.
 
 What it deliberately lacks: a login flow (OAuth), per-client permissions,
 and any record of *which* assistant queued a row. If you need those, the

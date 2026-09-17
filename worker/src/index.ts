@@ -65,23 +65,39 @@ const TOOLS = [
   {
     name: 'run_command',
     description:
-      'Run a shell command on the relay host and return its output. The command is ' +
-      'queued for a runner on that machine, which executes it as its user with a ' +
-      'timeout, and this call waits up to `wait` seconds for the result. If it ' +
-      'times out you get the row id; call get_result with it later. Anything you ' +
-      'send here RUNS: prefer read-only commands unless the user asked for a change.',
+      "Run a shell command on the user's own machine and return its output. The " +
+      'command is queued for a runner there, which executes it as the user with ' +
+      'bash -lc, a 600 s limit and up to 60 KB of output kept; this call waits up ' +
+      'to `wait` seconds for the result. Anything you send here RUNS on a real ' +
+      "machine: prefer read-only commands unless the user asked for a change, and " +
+      'never run something destructive on a guess.\n\n' +
+      'How to operate it:\n' +
+      '- The result starts with "#<id> <status> exit=<code>" then the output. ' +
+      'Status done means it ran; check exit= before trusting the output.\n' +
+      '- Commands run ONE AT A TIME in the order queued (unless the host set ' +
+      'RELAY_PARALLEL), so a long command holds everything behind it.\n' +
+      '- For anything that may take longer than the wait: pass a short wait, note ' +
+      'the id you get back, and call get_result later. Or background it yourself ' +
+      '(nohup ... > /tmp/job.log 2>&1 &) and read the log with a later command.\n' +
+      '- Output over 60 KB is cut; pipe through head, tail or grep instead of ' +
+      'dumping large files.\n' +
+      '- There is no working directory or shell state between calls: each ' +
+      "command starts fresh in the user's home. Use cd inside the command.\n" +
+      '- Quote carefully: the string is passed to bash exactly as given.',
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'The shell command, run with bash -lc.' },
-        wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 120).' },
+        command: { type: 'string', description: 'The shell command, run with bash -lc from the home directory.' },
+        wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 120). Use 0 to queue and return the id at once.' },
       },
       required: ['command'],
     },
   },
   {
     name: 'get_result',
-    description: 'Fetch the status and output of a command queued earlier, by the id run_command returned.',
+    description:
+      'Fetch the status and output of a command queued earlier, by the id run_command ' +
+      'returned. Status pending or running means it has not finished; call again later.',
     inputSchema: {
       type: 'object',
       properties: { id: { type: 'number', description: 'Row id from run_command.' } },
