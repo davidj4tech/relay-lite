@@ -21,6 +21,7 @@
 #     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
 #     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
 #     RELAY_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
+#     RELAY_DETACH_CHECK     seconds between looks for a detach on a running row (default 3)
 #
 # RELAY_PARALLEL, RELAY_CMD_TIMEOUT and RELAY_POLL are re-read from the env
 # file every poll: edit the file and the change is live within one interval.
@@ -52,6 +53,9 @@ PARALLEL="${RELAY_PARALLEL:-1}"
 # ceiling on that choice.
 BACKGROUND_MAX="${RELAY_BACKGROUND_MAX:-4}"
 [[ "$BACKGROUND_MAX" =~ ^[1-9][0-9]*$ ]] || BACKGROUND_MAX=4
+# Seconds between looks at whether a running foreground row was detached.
+DETACH_CHECK="${RELAY_DETACH_CHECK:-3}"
+[[ "$DETACH_CHECK" =~ ^[1-9][0-9]*$ ]] || DETACH_CHECK=3
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
 
 log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
@@ -115,6 +119,29 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
   printf '%s\n' "$nonce" >> "$SEEN"
 
   log "#$id: running: ${command:0:80}"
+  # Always in its own process, even in serial mode, so the queue can let go
+  # of it (detach) without killing it. The process writes its own result.
+  execute_and_write "$id" "$command" &
+  local pid=$!
+  if [[ "${5:-fg}" != fg ]]; then wait "$pid"; return; fi
+  # Foreground: hold the queue until it finishes -- unless someone flips the
+  # row to background meanwhile (the detach tool). Checked every
+  # RELAY_DETACH_CHECK seconds, a D1 read each time, so a short command
+  # never pays for it. On detach the job keeps running; only the waiting
+  # stops, and the next poll moves on to the queue behind it.
+  local t=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1; t=$(( t + 1 ))
+    if (( t % DETACH_CHECK == 0 )) && [[ "$(d1 "SELECT COALESCE(background, 0) AS bg FROM commands WHERE id = $id;" 2>/dev/null | jq -r '.[0].bg // 0')" == 1 ]]; then
+      log "#$id: detached after ${t}s — it keeps running, the queue moves on"
+      return 0
+    fi
+  done
+  wait "$pid"
+}
+
+execute_and_write() {  # $1 = id, $2 = command
+  local id="$1" command="$2" out rc
   out=$(timeout --kill-after=10 "$CMD_TIMEOUT" bash -lc "$command" 2>&1 </dev/null | head -c "$MAX_OUTPUT"; exit "${PIPESTATUS[0]}")
   rc=$?
   if (( rc == 124 || rc == 137 )); then
@@ -125,6 +152,20 @@ relay-lite: killed after ${CMD_TIMEOUT}s"
     write_result "$id" done "$rc" "$out"
     log "#$id: exit $rc, ${#out} bytes"
   fi
+}
+
+# A row still 'running' when this runner starts belonged to a runner that is
+# gone -- a restart mid-job takes its children with it (systemd kills the
+# group). Left alone it would stay 'running' forever and a waiting
+# get_result would only ever time out. One runner per database is the
+# assumption here; a second runner sharing it would see its jobs swept.
+sweep_orphans() {
+  local n
+  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
+        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running';" 2>/dev/null \
+      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n orphaned 'running' row(s) as error"
+  return 0
 }
 
 # Settings that may change while the runner is up are re-read every poll, so
@@ -157,16 +198,16 @@ poll() {
       # queue stays serial while a long job runs beside it.
       while (( $(jobs -rp | wc -l) >= BACKGROUND_MAX )); do sleep 0.5; done
       run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" &
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" bg &
     elif (( PARALLEL > 1 )); then
       # Hold here while the cap is full. A row another job already claimed
       # while we waited is refused by the claim's status check.
       while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 0.5; done
       run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" &
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" bg &
     else
       run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")"
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" fg
     fi
   done
   # Trim the nonce file from the one place that is never concurrent.
@@ -177,4 +218,5 @@ poll() {
 
 if [[ "${1:-}" == "--once" ]]; then poll; rc=$?; wait; exit $rc; fi
 log "polling '$DB' every ${POLL}s; commands run as $(id -un) with a ${CMD_TIMEOUT}s limit$( (( PARALLEL > 1 )) && echo ", up to $PARALLEL at once" )"
+sweep_orphans
 while :; do poll; sleep "$POLL"; done

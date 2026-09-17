@@ -70,6 +70,13 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   download does not hold up the quick command after it; the assistant
   fetches its output later with `get_result` and a `wait`. The owner caps
   how many such jobs run at once (`RELAY_BACKGROUND_MAX`, default 4).
+  `detach` does the same to a command that is already running, so a job
+  that turns out slow stops holding the queue without being killed. Every
+  command runs in its own process for this reason; the runner looks for a
+  detach every few seconds while it waits on one (`RELAY_DETACH_CHECK`).
+- **A runner restart mid-job** marks the rows it was running as `error`
+  on startup, with a note saying the command may or may not have completed,
+  rather than leaving them `running` forever. One runner per database.
 
 What it deliberately lacks: a login flow (OAuth), per-client permissions,
 and any record of *which* assistant queued a row. If you need those, the

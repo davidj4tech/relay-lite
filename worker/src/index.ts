@@ -102,6 +102,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'detach',
+    description:
+      'Let a command that is already running (or still queued) stop holding up the queue: ' +
+      'it keeps running in the background and commands after it proceed. Use it when ' +
+      'something is taking longer than expected and you want to do other things meanwhile. ' +
+      'Collect its output later with get_result and a wait. Does not stop or kill anything.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'number', description: 'Row id from run_command.' } },
+      required: ['id'],
+    },
+  },
+  {
     name: 'get_result',
     description:
       'Fetch the status and output of a command queued earlier, by the id run_command ' +
@@ -221,6 +234,19 @@ export default {
           const wait = clampWait(env, args.wait, Number(env.RELAY_WAIT_DEFAULT ?? 30))
           const r = await enqueue(env, command, wait, args.background === true)
           return toolText(id, render(r.row, r.timedOut), !r.timedOut && ['error', 'rejected', 'timeout'].includes(r.row.status))
+        }
+        if (name === 'detach') {
+          const rid = Number(args.id)
+          if (!Number.isInteger(rid)) return toolText(id, 'detach needs a numeric id.', true)
+          const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(rid).first<Row>()
+          if (!row) return toolText(id, `No command #${rid}.`, true)
+          if (TERMINAL.includes(row.status)) return toolText(id, `#${rid} already finished (${row.status}); nothing to detach.\n${render(row, false)}`)
+          await env.DB.prepare(`UPDATE commands SET background = 1, updated_at = datetime('now') WHERE id = ?`).bind(rid).run()
+          return toolText(
+            id,
+            `#${rid} detached: it keeps running, and commands queued after it no longer wait for it ` +
+              `(the runner notices within a few seconds). Collect its output later with get_result(id=${rid}, wait=…).`,
+          )
         }
         if (name === 'get_result') {
           const rid = Number(args.id)
