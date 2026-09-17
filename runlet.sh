@@ -15,8 +15,10 @@
 #     runlet.sh sign <nonce> <command>   # the signature this runner expects
 #
 # Config: ~/.config/runlet/env (written by install.sh):
-#     CLOUDFLARE_API_TOKEN   token wrangler uses to read and write D1
+#     CLOUDFLARE_API_TOKEN   token for reading and writing D1 (over its HTTP API)
+#     CLOUDFLARE_ACCOUNT_ID  account holding the database (default: from wrangler.jsonc)
 #     RUNLET_DB_NAME          D1 database (default runlet)
+#     RUNLET_DB_ID            its id (default: looked up by name in wrangler.jsonc)
 #     RUNLET_KEY_FILE         hex key shared with the Worker (default relay.key beside env)
 #     RUNLET_POLL             seconds between polls (default 5)
 #     RUNLET_CMD_TIMEOUT      seconds a command may run (default 600)
@@ -102,20 +104,58 @@ if [[ "${1:-}" == sign ]]; then
   exit 0
 fi
 
-WRANGLER=$(command -v wrangler || true)
-[[ -n "$WRANGLER" && -x "$HERE/worker/node_modules/.bin/wrangler" ]] && WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
-[[ -n "$WRANGLER" ]] || WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
-[[ -x "$WRANGLER" ]] || { log "wrangler not found; run install.sh"; exit 1; }
-[[ -r "$WRANGLER_CFG" ]] || { log "no wrangler config at $WRANGLER_CFG; run install.sh"; exit 1; }
+# D1 is reached over its HTTP API with curl: one request per query, about
+# 0.1 s, where each `wrangler d1 execute` started Node and took 1.5-2 s --
+# several of those per command made every hand-off 10-15 s. The account and
+# database ids come from the env file, else from wrangler.jsonc. Without a
+# token or ids it falls back to wrangler, as before.
+ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
+DB_ID="${RUNLET_DB_ID:-}"
+if [[ -r "$WRANGLER_CFG" ]] && [[ -z "$ACCOUNT_ID" || -z "$DB_ID" ]]; then
+  cfg=$(grep -v '^[[:space:]]*//' "$WRANGLER_CFG" | jq -c . 2>/dev/null)
+  [[ -n "$ACCOUNT_ID" ]] || ACCOUNT_ID=$(jq -r '.account_id // empty' <<<"$cfg" 2>/dev/null)
+  [[ -n "$DB_ID" ]] || DB_ID=$(jq -r --arg n "$DB" '.d1_databases[]? | select(.database_name == $n) | .database_id' <<<"$cfg" 2>/dev/null | head -1)
+fi
+if [[ -n "${CLOUDFLARE_API_TOKEN:-}" && -n "$ACCOUNT_ID" && "$DB_ID" =~ ^[0-9a-f-]{36}$ ]] && command -v curl >/dev/null 2>&1; then
+  D1_URL="https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/d1/database/$DB_ID/query"
+else
+  D1_URL=
+  WRANGLER=$(command -v wrangler || true)
+  [[ -n "$WRANGLER" && -x "$HERE/worker/node_modules/.bin/wrangler" ]] && WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
+  [[ -n "$WRANGLER" ]] || WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
+  [[ -x "$WRANGLER" ]] || { log "wrangler not found; run install.sh"; exit 1; }
+  [[ -r "$WRANGLER_CFG" ]] || { log "no wrangler config at $WRANGLER_CFG; run install.sh"; exit 1; }
+fi
 [[ -r "$KEY_FILE" ]] || { log "no key at $KEY_FILE; run install.sh"; exit 1; }
 KEY=$(tr -d '[:space:]' < "$KEY_FILE")
 [[ "$KEY" =~ ^[0-9a-fA-F]{32,}$ ]] || { log "key in $KEY_FILE is not a hex string"; exit 1; }
 mkdir -p "$(dirname "$SEEN")" "$STATE_DIR"
 
 # --- D1 ----------------------------------------------------------------------
+# `d1_exec <sql>`: the raw reply, [{results, meta}], the shape wrangler's
+# --json prints, which the HTTP API returns as .result. The SQL goes in on
+# stdin, so a 60 KB output literal never meets the argument-length limit.
+d1_exec() {
+  if [[ -z "$D1_URL" ]]; then
+    # stdout only: wrangler's warnings on stderr would spoil the JSON.
+    "$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json --command "$1"
+    return
+  fi
+  local raw
+  # The token goes in through a file descriptor, never on curl's command
+  # line, where any user could read it in ps.
+  raw=$(jq -Rsc '{sql: .}' <<<"$1" | curl -sS --max-time 60 -X POST "$D1_URL" \
+          -H @<(printf 'Authorization: Bearer %s\n' "$CLOUDFLARE_API_TOKEN") \
+          -H 'Content-Type: application/json' --data-binary @- 2>&1) \
+    || { printf '%s' "$raw"; return 1; }
+  jq -ce 'if .success then .result else error("\(.errors // [] | map(.message) | join("; "))") end' <<<"$raw" 2>/dev/null \
+    || { printf 'D1 API error: %s' "$(jq -r '.errors // [] | map(.message) | join("; ")' <<<"$raw" 2>/dev/null || printf '%s' "${raw:0:200}")"; return 1; }
+}
+# `d1_changes <sql>`: rows a write changed, 0 on any failure.
+d1_changes() { d1_exec "$1" 2>/dev/null | jq -r '.[0].meta.changes // 0' 2>/dev/null || echo 0; }
 d1() {  # $1 = sql -> results array on stdout, or non-zero
   local raw
-  raw=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json --command "$1" 2>&1) || {
+  raw=$(d1_exec "$1") || {
     log "d1 failed: $(printf '%s' "$raw" | grep -v '^\s*$' | tail -1)"; return 1; }
   printf '%s' "$raw" | jq -ce 'if type=="array" then .[0].results // [] else error("bad envelope") end' 2>/dev/null || {
     log "unparseable d1 response: $(printf '%s' "$raw" | head -1)"; return 1; }
@@ -149,9 +189,7 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
     write_result "$id" rejected -1 "runlet: signature did not verify"; return
   fi
   # Claim it. `AND status = 'pending'` means only one runner can win.
-  claimed=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-              --command "UPDATE commands SET status = 'running', runner = '$(sql_lit "$RUNNER_ID")', updated_at = datetime('now') WHERE id = $id AND status = 'pending';" 2>/dev/null \
-            | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  claimed=$(d1_changes "UPDATE commands SET status = 'running', runner = '$(sql_lit "$RUNNER_ID")', updated_at = datetime('now') WHERE id = $id AND status = 'pending';")
   [[ "$claimed" == 1 ]] || { log "#$id: claimed by someone else"; return; }
   # Append only here: parallel jobs may write at once, and appends are safe
   # where a rewrite is not. The file is trimmed by poll(), single-threaded.
@@ -245,9 +283,7 @@ runlet: killed after ${CMD_TIMEOUT}s"
 # start and then once a day; rows still pending or running are never touched.
 prune_old() {
   local n
-  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "DELETE FROM commands WHERE status NOT IN ('pending', 'running') AND created_at < datetime('now', '-${KEEP_DAYS} days');" 2>/dev/null \
-      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  n=$(d1_changes "DELETE FROM commands WHERE status NOT IN ('pending', 'running') AND created_at < datetime('now', '-${KEEP_DAYS} days');")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "pruned $n finished row(s) older than ${KEEP_DAYS} days"
   LAST_PRUNE=$SECONDS
   return 0
@@ -260,9 +296,7 @@ prune_old() {
 # assumption here; a second runner sharing it would see its jobs swept.
 sweep_orphans() {
   local n
-  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running' AND (runner = '$(sql_lit "$RUNNER_ID")' OR runner IS NULL);" 2>/dev/null \
-      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  n=$(d1_changes "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running' AND (runner = '$(sql_lit "$RUNNER_ID")' OR runner IS NULL);")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n orphaned 'running' row(s) of runner '$RUNNER_ID' as error"
   return 0
 }
@@ -275,9 +309,7 @@ sweep_orphans() {
 # never caught by this.
 sweep_stale() {
   local n
-  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: ran past the timeout without reporting; the runner may have hung', updated_at = datetime('now') WHERE status = 'running' AND runner = '$(sql_lit "$RUNNER_ID")' AND updated_at < datetime('now', '-$(( CMD_TIMEOUT + 120 )) seconds');" 2>/dev/null \
-      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  n=$(d1_changes "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: ran past the timeout without reporting; the runner may have hung', updated_at = datetime('now') WHERE status = 'running' AND runner = '$(sql_lit "$RUNNER_ID")' AND updated_at < datetime('now', '-$(( CMD_TIMEOUT + 120 )) seconds');")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n stale 'running' row(s) as error"
   LAST_STALE=$SECONDS
   return 0
