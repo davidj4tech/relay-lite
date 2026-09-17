@@ -129,11 +129,13 @@ sed -e "s/__WORKER_NAME__/$WORKER_NAME/" -e "s/__ACCOUNT_ID__/$ACCOUNT_ID/" \
 # Columns added after the first release, for a database created before
 # them. ALTER TABLE is not idempotent in SQLite, so look first.
 cols=$( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --json --command "PRAGMA table_info(commands);" 2>/dev/null | jq -r '.[0].results[].name' )
-if ! grep -qx background <<<"$cols"; then
-  ( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --command "ALTER TABLE commands ADD COLUMN background INTEGER NOT NULL DEFAULT 0;" >/dev/null ) \
-    || die "adding the background column failed"
-  note "added the background column"
-fi
+for col in background cancel; do
+  if ! grep -qx "$col" <<<"$cols"; then
+    ( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --command "ALTER TABLE commands ADD COLUMN $col INTEGER NOT NULL DEFAULT 0;" >/dev/null ) \
+      || die "adding the $col column failed"
+    note "added the $col column"
+  fi
+done
 note "schema applied"
 
 # --- 5. secrets --------------------------------------------------------------

@@ -74,6 +74,13 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   that turns out slow stops holding the queue without being killed. Every
   command runs in its own process for this reason; the runner looks for a
   detach every few seconds while it waits on one (`RELAY_DETACH_CHECK`).
+- **`cancel` stops a command.** One still queued never starts; one running
+  is killed with everything it spawned (it runs as its own process group)
+  and its status becomes `cancelled`, with whatever output there was. It
+  stops; it does not undo.
+- **Finished rows are pruned** after `RELAY_KEEP_DAYS` (default 30), once
+  a day, so the table does not grow forever. Pending and running rows are
+  never touched.
 - **A runner restart mid-job** marks the rows it was running as `error`
   on startup, with a note saying the command may or may not have completed,
   rather than leaving them `running` forever. One runner per database.

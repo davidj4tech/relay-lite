@@ -21,7 +21,8 @@
 #     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
 #     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
 #     RELAY_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
-#     RELAY_DETACH_CHECK     seconds between looks for a detach on a running row (default 3)
+#     RELAY_DETACH_CHECK     seconds between looks for a detach or cancel on a running row (default 3)
+#     RELAY_KEEP_DAYS        finished rows older than this are deleted daily (default 30)
 #
 # RELAY_PARALLEL, RELAY_CMD_TIMEOUT and RELAY_POLL are re-read from the env
 # file every poll: edit the file and the change is live within one interval.
@@ -56,6 +57,11 @@ BACKGROUND_MAX="${RELAY_BACKGROUND_MAX:-4}"
 # Seconds between looks at whether a running foreground row was detached.
 DETACH_CHECK="${RELAY_DETACH_CHECK:-3}"
 [[ "$DETACH_CHECK" =~ ^[1-9][0-9]*$ ]] || DETACH_CHECK=3
+# Finished rows older than this many days are deleted, once a day.
+KEEP_DAYS="${RELAY_KEEP_DAYS:-30}"
+[[ "$KEEP_DAYS" =~ ^[1-9][0-9]*$ ]] || KEEP_DAYS=30
+LAST_PRUNE=-100000
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite"
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
 
 log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
@@ -71,7 +77,7 @@ WRANGLER=$(command -v wrangler || true)
 [[ -r "$KEY_FILE" ]] || { log "no key at $KEY_FILE; run install.sh"; exit 1; }
 KEY=$(tr -d '[:space:]' < "$KEY_FILE")
 [[ "$KEY" =~ ^[0-9a-fA-F]{32,}$ ]] || { log "key in $KEY_FILE is not a hex string"; exit 1; }
-mkdir -p "$(dirname "$SEEN")"
+mkdir -p "$(dirname "$SEEN")" "$STATE_DIR"
 
 # --- D1 ----------------------------------------------------------------------
 d1() {  # $1 = sql -> results array on stdout, or non-zero
@@ -120,31 +126,66 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
 
   log "#$id: running: ${command:0:80}"
   # Always in its own process, even in serial mode, so the queue can let go
-  # of it (detach) without killing it. The process writes its own result.
+  # of it (detach) or stop it (cancel) from outside. The process writes its
+  # own result.
   execute_and_write "$id" "$command" &
-  local pid=$!
-  if [[ "${5:-fg}" != fg ]]; then wait "$pid"; return; fi
-  # Foreground: hold the queue until it finishes -- unless someone flips the
-  # row to background meanwhile (the detach tool). Checked every
-  # RELAY_DETACH_CHECK seconds, a D1 read each time, so a short command
-  # never pays for it. On detach the job keeps running; only the waiting
-  # stops, and the next poll moves on to the queue behind it.
-  local t=0
+  watch_job "$id" "$!" "${5:-fg}"
+}
+
+# Watch a running job for a cancel, and (in the foreground) for a detach.
+# Every RELAY_DETACH_CHECK seconds it reads the row's two flags -- one D1
+# read, so a short command never pays for it. A cancel kills the job's whole
+# process group and lets execute_and_write record the outcome. A detach in
+# the foreground hands the watching over to a background copy of this loop
+# and returns, so the queue moves on while the job runs.
+watch_job() {  # $1 = id, $2 = pid of execute_and_write, $3 = fg|bg
+  local id="$1" pid="$2" mode="$3" t=0 flags bg c
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1; t=$(( t + 1 ))
-    if (( t % DETACH_CHECK == 0 )) && [[ "$(d1 "SELECT COALESCE(background, 0) AS bg FROM commands WHERE id = $id;" 2>/dev/null | jq -r '.[0].bg // 0')" == 1 ]]; then
+    (( t % DETACH_CHECK == 0 )) || continue
+    flags=$(d1 "SELECT COALESCE(background, 0) AS bg, COALESCE(cancel, 0) AS c FROM commands WHERE id = $id;" 2>/dev/null \
+            | jq -r '.[0] | "\(.bg) \(.c)"' 2>/dev/null)
+    bg="${flags%% *}"; c="${flags##* }"
+    if [[ "$c" == 1 ]]; then cancel_job "$id"; return 0; fi
+    if [[ "$mode" == fg && "$bg" == 1 ]]; then
       log "#$id: detached after ${t}s — it keeps running, the queue moves on"
+      ( watch_job "$id" "$pid" bg ) &
       return 0
     fi
   done
-  wait "$pid"
+}
+
+# Kill a job and everything it spawned: the command runs as its own process
+# group (setsid), whose id execute_and_write wrote down. The marker file
+# tells execute_and_write to record 'cancelled' rather than an exit code,
+# with whatever output there was, and it wins over the timeout branch.
+cancel_job() {  # $1 = id
+  local id="$1" pgid
+  pgid=$(cat "$STATE_DIR/job.$id.pgid" 2>/dev/null)
+  : > "$STATE_DIR/cancel.$id"
+  if [[ "$pgid" =~ ^[0-9]+$ ]]; then
+    kill -TERM -- "-$pgid" 2>/dev/null
+    local i; for (( i = 0; i < 5; i++ )); do kill -0 -- "-$pgid" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$pgid" 2>/dev/null
+  fi
+  log "#$id: cancel requested — killed process group ${pgid:-?}"
 }
 
 execute_and_write() {  # $1 = id, $2 = command
-  local id="$1" command="$2" out rc
-  out=$(timeout --kill-after=10 "$CMD_TIMEOUT" bash -lc "$command" 2>&1 </dev/null | head -c "$MAX_OUTPUT"; exit "${PIPESTATUS[0]}")
-  rc=$?
-  if (( rc == 124 || rc == 137 )); then
+  local id="$1" command="$2" out rc outf="$STATE_DIR/job.$id.out"
+  # setsid: a fresh process group, whose leader writes its own pid down
+  # (equal to the group id) before exec'ing the command under timeout.
+  setsid bash -c 'echo $$ > "$1"; exec timeout --kill-after=10 "$2" bash -lc "$3"' _ \
+    "$STATE_DIR/job.$id.pgid" "$CMD_TIMEOUT" "$command" </dev/null >"$outf" 2>&1 &
+  wait "$!"; rc=$?
+  out=$(head -c "$MAX_OUTPUT" "$outf" 2>/dev/null)
+  rm -f "$outf" "$STATE_DIR/job.$id.pgid"
+  if [[ -e "$STATE_DIR/cancel.$id" ]]; then
+    rm -f "$STATE_DIR/cancel.$id"
+    write_result "$id" cancelled -1 "$out
+relay-lite: cancelled after it had started; whatever it did before that is done"
+    log "#$id: cancelled, ${#out} bytes of output kept"
+  elif (( rc == 124 || rc == 137 )); then
     write_result "$id" timeout "$rc" "$out
 relay-lite: killed after ${CMD_TIMEOUT}s"
     log "#$id: timed out"
@@ -152,6 +193,19 @@ relay-lite: killed after ${CMD_TIMEOUT}s"
     write_result "$id" done "$rc" "$out"
     log "#$id: exit $rc, ${#out} bytes"
   fi
+}
+
+# Finished rows older than RELAY_KEEP_DAYS go. The table is the only thing
+# here that grows without bound, and nothing reads an old result. Runs at
+# start and then once a day; rows still pending or running are never touched.
+prune_old() {
+  local n
+  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
+        --command "DELETE FROM commands WHERE status NOT IN ('pending', 'running') AND created_at < datetime('now', '-${KEEP_DAYS} days');" 2>/dev/null \
+      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "pruned $n finished row(s) older than ${KEEP_DAYS} days"
+  LAST_PRUNE=$SECONDS
+  return 0
 }
 
 # A row still 'running' when this runner starts belonged to a runner that is
@@ -219,4 +273,7 @@ poll() {
 if [[ "${1:-}" == "--once" ]]; then poll; rc=$?; wait; exit $rc; fi
 log "polling '$DB' every ${POLL}s; commands run as $(id -un) with a ${CMD_TIMEOUT}s limit$( (( PARALLEL > 1 )) && echo ", up to $PARALLEL at once" )"
 sweep_orphans
-while :; do poll; sleep "$POLL"; done
+while :; do
+  (( SECONDS - LAST_PRUNE >= 86400 )) && prune_old
+  poll; sleep "$POLL"
+done

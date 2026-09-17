@@ -36,7 +36,8 @@ interface Env {
 }
 
 const PROTOCOL_VERSION = '2025-06-18'
-const TERMINAL = ['done', 'error', 'rejected', 'timeout']
+const TERMINAL = ['done', 'error', 'rejected', 'timeout', 'cancelled']
+const FAILED = ['error', 'rejected', 'timeout', 'cancelled']
 const MAX_COMMAND_CHARS = 8000
 
 // --- signing (mirrors tmux-relay relay-sign.sh relay_hmac) -----------------
@@ -99,6 +100,22 @@ const TOOLS = [
         },
       },
       required: ['command'],
+    },
+  },
+  {
+    name: 'cancel',
+    description:
+      'Stop a command: one still queued never starts; one already running is killed by the ' +
+      'runner (with everything it spawned) and its status becomes cancelled. Whatever the ' +
+      'command had already done stays done -- this stops it, it does not undo it. ' +
+      'Waits briefly (default 15 s, `wait` to change) for the runner to confirm.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Row id from run_command.' },
+        wait: { type: 'number', description: 'Seconds to wait for the runner to confirm (default 15, max 120).' },
+      },
+      required: ['id'],
     },
   },
   {
@@ -233,7 +250,28 @@ export default {
           if (command.length > MAX_COMMAND_CHARS) return toolText(id, `Command is ${command.length} characters; the limit is ${MAX_COMMAND_CHARS}.`, true)
           const wait = clampWait(env, args.wait, Number(env.RELAY_WAIT_DEFAULT ?? 30))
           const r = await enqueue(env, command, wait, args.background === true)
-          return toolText(id, render(r.row, r.timedOut), !r.timedOut && ['error', 'rejected', 'timeout'].includes(r.row.status))
+          return toolText(id, render(r.row, r.timedOut), !r.timedOut && FAILED.includes(r.row.status))
+        }
+        if (name === 'cancel') {
+          const rid = Number(args.id)
+          if (!Number.isInteger(rid)) return toolText(id, 'cancel needs a numeric id.', true)
+          const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(rid).first<Row>()
+          if (!row) return toolText(id, `No command #${rid}.`, true)
+          if (TERMINAL.includes(row.status)) return toolText(id, `#${rid} already finished (${row.status}); nothing to cancel.\n${render(row, false)}`)
+          // Still queued: it never starts. The runner claims only 'pending'
+          // rows, so flipping the status here is enough and needs no runner.
+          const q = await env.DB.prepare(
+            `UPDATE commands SET status = 'cancelled', exit_code = -1, output = 'relay-lite: cancelled before it started', updated_at = datetime('now')
+              WHERE id = ? AND status = 'pending'`,
+          ).bind(rid).run()
+          if (q.meta.changes === 1) return toolText(id, `#${rid} cancelled before it started.`)
+          // Running: ask the runner to kill it, and wait a little for the
+          // row to settle so the caller learns whether it did.
+          await env.DB.prepare(`UPDATE commands SET cancel = 1, updated_at = datetime('now') WHERE id = ?`).bind(rid).run()
+          const r = await awaitRow(env, rid, clampWait(env, args.wait, 15))
+          if (r.row && r.row.status === 'cancelled') return toolText(id, `#${rid} cancelled: the runner killed it.\n${render(r.row, false)}`)
+          if (r.row && TERMINAL.includes(r.row.status)) return toolText(id, `#${rid} finished on its own before the cancel took effect.\n${render(r.row, false)}`)
+          return toolText(id, `#${rid}: cancel requested; the runner had not confirmed within the wait. Check with get_result(id=${rid}, wait=…).`)
         }
         if (name === 'detach') {
           const rid = Number(args.id)
@@ -257,7 +295,7 @@ export default {
           const wait = clampWait(env, args.wait, 0)
           const r = await awaitRow(env, rid, wait)
           if (!r.row) return toolText(id, `No command #${rid}.`, true)
-          return toolText(id, render(r.row, r.timedOut), ['error', 'rejected', 'timeout'].includes(r.row.status))
+          return toolText(id, render(r.row, r.timedOut), FAILED.includes(r.row.status))
         }
         return rpcError(id, -32601, `unknown tool ${JSON.stringify(name)}`)
       }
