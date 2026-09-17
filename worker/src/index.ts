@@ -41,7 +41,9 @@ const FAILED = ['error', 'rejected', 'timeout', 'cancelled']
 const MAX_COMMAND_CHARS = 8000
 
 // --- signing (mirrors tmux-relay relay-sign.sh relay_hmac) -----------------
-async function hmacHex(keyText: string, message: string): Promise<string> {
+// Exported for tests/check-signing.sh, which holds this and the runner's
+// openssl implementation to the same vectors.
+export async function hmacHex(keyText: string, message: string): Promise<string> {
   const enc = new TextEncoder()
   // The key is the ASCII characters of the hex string, not the decoded bytes:
   // bash passes `-macopt key:$KEY`, which takes the literal text.

@@ -11,6 +11,8 @@
 #
 #     relay-lite.sh            # poll forever (the service form)
 #     relay-lite.sh --once     # one poll, for testing
+#     relay-lite.sh status [n] # the last n rows (default 10), newest first
+#     relay-lite.sh sign <nonce> <command>   # the signature this runner expects
 #
 # Config: ~/.config/relay-lite/env (written by install.sh):
 #     CLOUDFLARE_API_TOKEN   token wrangler uses to read and write D1
@@ -75,6 +77,7 @@ RUNNER_ID="${RELAY_RUNNER_ID:-$(hostname -s 2>/dev/null || hostname)}"
 KEEP_DAYS="${RELAY_KEEP_DAYS:-30}"
 [[ "$KEEP_DAYS" =~ ^[1-9][0-9]*$ ]] || KEEP_DAYS=30
 LAST_PRUNE=-100000
+LAST_STALE=-100000
 LOAD_HELD=0
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite"
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
@@ -84,6 +87,17 @@ log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
 for dep in jq openssl timeout; do
   command -v "$dep" >/dev/null 2>&1 || { log "missing dependency: $dep"; exit 1; }
 done
+
+# `sign <nonce> <command>`: print the signature this runner would expect,
+# using the key in RELAY_KEY_FILE (or RELAY_KEY). For tests/check-signing.sh,
+# which holds this and the Worker's implementation to one set of vectors.
+if [[ "${1:-}" == sign ]]; then
+  KEY="${RELAY_KEY:-$(tr -d '[:space:]' < "$KEY_FILE" 2>/dev/null)}"
+  [[ -n "$KEY" ]] || { echo "relay-lite sign: no key (RELAY_KEY or $KEY_FILE)" >&2; exit 1; }
+  printf '%s\n%s' "$2" "$3" | openssl dgst -sha256 -mac HMAC -macopt "key:$KEY" -r 2>/dev/null | cut -d' ' -f1
+  exit 0
+fi
+
 WRANGLER=$(command -v wrangler || true)
 [[ -n "$WRANGLER" && -x "$HERE/worker/node_modules/.bin/wrangler" ]] && WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
 [[ -n "$WRANGLER" ]] || WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
@@ -249,6 +263,22 @@ sweep_orphans() {
   return 0
 }
 
+# A row 'running' for longer than the timeout plus a grace period, with no
+# result written, belonged to a job whose runner hung rather than restarted:
+# the timeout would have killed a live one and recorded it. Swept every few
+# minutes, own rows only. Progress writes keep a talkative job's updated_at
+# fresh, and a silent one is killed by the timeout first, so a live job is
+# never caught by this.
+sweep_stale() {
+  local n
+  n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
+        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: ran past the timeout without reporting; the runner may have hung', updated_at = datetime('now') WHERE status = 'running' AND runner = '$(sql_lit "$RUNNER_ID")' AND updated_at < datetime('now', '-$(( CMD_TIMEOUT + 120 )) seconds');" 2>/dev/null \
+      | jq -r '.[0].meta.changes // 0' 2>/dev/null)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n stale 'running' row(s) as error"
+  LAST_STALE=$SECONDS
+  return 0
+}
+
 # Settings that may change while the runner is up are re-read every poll, so
 # editing ~/.config/relay-lite/env takes effect within one poll interval and
 # no restart is needed. Only these: the token, key and database stay as
@@ -290,25 +320,28 @@ poll() {
   rows=$(d1 "SELECT id, command, sig, nonce, COALESCE(background, 0) AS background FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
   local n; n=$(printf '%s' "$rows" | jq 'length')
   (( n > 0 )) || return 0
-  local i bg
+  local i bg id sig nonce cmd
   for (( i = 0; i < n; i++ )); do
     bg=$(jq -r ".[$i].background" <<<"$rows")
+    # Read once, keeping any trailing newline: $(...) strips them, and a
+    # signature over the stripped text does not verify. The X is a sentinel
+    # for the strip, removed right after.
+    id=$(jq -r ".[$i].id" <<<"$rows"); sig=$(jq -r ".[$i].sig" <<<"$rows"); nonce=$(jq -r ".[$i].nonce" <<<"$rows")
+    # -j, not -r: -r appends a newline of its own, which the X would keep.
+    cmd=$(jq -j ".[$i].command" <<<"$rows"; printf X); cmd="${cmd%X}"
     if [[ "$bg" == 1 ]]; then
       # Asked to run alongside the queue (run_command background=true). Its
       # own cap, RELAY_BACKGROUND_MAX, independent of RELAY_PARALLEL: the
       # queue stays serial while a long job runs beside it.
       while (( $(jobs -rp | wc -l) >= BACKGROUND_MAX )); do sleep 0.5; done
-      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" bg &
+      run_one "$id" "$cmd" "$sig" "$nonce" bg &
     elif (( PARALLEL > 1 )); then
       # Hold here while the cap is full. A row another job already claimed
       # while we waited is refused by the claim's status check.
       while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 0.5; done
-      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" bg &
+      run_one "$id" "$cmd" "$sig" "$nonce" bg &
     else
-      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
-              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" fg
+      run_one "$id" "$cmd" "$sig" "$nonce" fg
     fi
   done
   # Trim the nonce file from the one place that is never concurrent.
@@ -317,10 +350,21 @@ poll() {
   fi
 }
 
+# `status`: the last rows, newest first -- "is it stuck?" as one command.
+if [[ "${1:-}" == status ]]; then
+  d1 "SELECT id, status, exit_code, runner, created_at, updated_at,
+             substr(replace(replace(command, char(10), ' '), char(9), ' '), 1, 50) AS command,
+             substr(replace(output, char(10), ' | '), 1, 70) AS output
+      FROM commands ORDER BY id DESC LIMIT ${2:-10};" \
+    | jq -r '.[] | "#\(.id)\t\(.status)\(if .exit_code == null then "" else " exit=\(.exit_code)" end)\t\(.updated_at)\t\(.command)\n\t\t\t\(.output // "")"'
+  exit 0
+fi
+
 if [[ "${1:-}" == "--once" ]]; then poll; rc=$?; wait; exit $rc; fi
 log "polling '$DB' every ${POLL}s; commands run as $(id -un) with a ${CMD_TIMEOUT}s limit$( (( PARALLEL > 1 )) && echo ", up to $PARALLEL at once" )"
 sweep_orphans
 while :; do
   (( SECONDS - LAST_PRUNE >= 86400 )) && prune_old
+  (( SECONDS - LAST_STALE >= 300 )) && sweep_stale
   poll; sleep "$POLL"
 done

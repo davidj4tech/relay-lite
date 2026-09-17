@@ -92,7 +92,16 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   never touched.
 - **A runner restart mid-job** marks the rows it was running as `error`
   on startup, with a note saying the command may or may not have completed,
-  rather than leaving them `running` forever. One runner per database.
+  rather than leaving them `running` forever. A row still `running` well
+  past the timeout with no result, which means the runner hung rather than
+  restarted, is marked the same way every few minutes.
+- **`relay-lite.sh status`** prints the last ten rows, newest first, with
+  status, time, command and the start of the output: "is it stuck?" as one
+  command. `status 30` for more.
+- **`tests/check-signing.sh`** holds the runner's openssl signing and the
+  Worker's WebCrypto signing to one set of vectors, the same fixture
+  tmux-relay's runner is pinned to. A drift there would reject every
+  command with no useful error, so run it after touching either side.
 
 What it deliberately lacks: a login flow (OAuth), per-client permissions,
 and any record of *which* assistant queued a row. If you need those, the
