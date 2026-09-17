@@ -53,7 +53,10 @@ Worker and database named `runlet-<site>` (default: the hostname). Copy
 ## What keeps this safe enough
 
 - **The URL is the credential.** The endpoint is `/<secret>/mcp`; every
-  other path is a 404, compared in constant time. Give it to one assistant.
+  other path is a 404, compared in constant time. The secret is seven random
+  words from the EFF short wordlist (`words.txt`), about 72 bits, so it
+  reads as `/jog-lapel-flame-lift-charm-elk-opera/mcp` rather than 48 hex
+  characters. Give it to one assistant.
   Rotate it by deleting the `RUNLET_URL_SECRET` line from
   `~/.config/runlet/env` and re-running the installer.
 - **Rows are signed.** HMAC-SHA256 over the nonce and the command, keyed

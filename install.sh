@@ -42,6 +42,14 @@ if [[ -r "$HERE/install.conf" ]]; then set -a; . "$HERE/install.conf"; set +a; f
 RUNLET_SITE="${RUNLET_SITE:-$(hostname -s 2>/dev/null || hostname)}"
 RUNLET_SITE=$(printf '%s' "$RUNLET_SITE" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-\n' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
 [[ -n "$RUNLET_SITE" ]] || RUNLET_SITE=site
+# A re-run must find the stack it made, even if the hostname changed or the
+# names were edited by hand: the names written to the env file last time
+# win over the site default. An explicit RUNLET_WORKER_NAME / RUNLET_DB_NAME
+# in the environment or install.conf still wins over both.
+if [[ -r "$CONF/env" ]]; then
+  : "${RUNLET_WORKER_NAME:=$(sed -n 's/^RUNLET_WORKER_NAME=//p' "$CONF/env" | tail -1)}"
+  : "${RUNLET_DB_NAME:=$(sed -n 's/^RUNLET_DB_NAME=//p' "$CONF/env" | tail -1)}"
+fi
 WORKER_NAME="${RUNLET_WORKER_NAME:-runlet-$RUNLET_SITE}"
 DB_NAME="${RUNLET_DB_NAME:-runlet-$RUNLET_SITE}"
 API=https://api.cloudflare.com/client/v4
@@ -148,7 +156,15 @@ else note "relay.key exists, keeping it"; fi
 if [[ -r "$CONF/env" ]] && URL_SECRET=$(sed -n 's/^RUNLET_URL_SECRET=//p' "$CONF/env" | tail -1) && [[ -n "$URL_SECRET" ]]; then
   note "URL secret exists, keeping it"
 else
-  URL_SECRET=$(openssl rand -hex 24); note "generated the URL secret"
+  # Seven random words from the EFF short list (1295 words): about 72 bits,
+  # beyond online guessing, and a URL a person can read back over the phone.
+  # Hex if the list is missing, so a stripped-down copy still installs.
+  if [[ -r "$HERE/words.txt" ]] && (( $(wc -l < "$HERE/words.txt") > 1000 )); then
+    URL_SECRET=$(shuf -n 7 --random-source=/dev/urandom "$HERE/words.txt" | paste -sd- -)
+    note "generated the URL secret (seven words)"
+  else
+    URL_SECRET=$(openssl rand -hex 24); note "generated the URL secret (hex; words.txt not found)"
+  fi
 fi
 ( cd "$HERE/worker" \
   && tr -d '[:space:]' < "$CONF/relay.key" | "$WRANGLER" secret put RUNLET_HMAC_KEY >/dev/null \

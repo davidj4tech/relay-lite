@@ -70,9 +70,9 @@ cd runlet
 ./install.sh
 ```
 
-Either way, the installer ends with **Done**, prints a long web address
-ending in `/mcp`, puts it on your clipboard, and opens Claude's connectors
-page in your browser. That address is your key: anyone who has it can run
+Either way, the installer ends with **Done**, prints a web address made of
+seven random words and ending in `/mcp`, puts it on your clipboard, and
+opens Claude's connectors page in your browser. That address is your key: anyone who has it can run
 commands on this computer. Keep it private.
 
 ## 4. Connect the assistant
