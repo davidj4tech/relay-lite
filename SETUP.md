@@ -1,4 +1,4 @@
-# relay-lite — setup, start to finish
+# runlet — setup, start to finish
 
 This lets an AI assistant run commands on this computer and read the
 results. It takes about fifteen minutes. You need a free Cloudflare account,
@@ -22,7 +22,7 @@ The installer needs a token that lets it create things in your account.
 1. Go to <https://dash.cloudflare.com/profile/api-tokens>.
 2. Click **Create Token**, then at the bottom **Get started** next to
    **Create Custom Token**.
-3. Name it `relay-lite`.
+3. Name it `runlet`.
 4. Under **Permissions**, add three rows. Each row has three boxes:
    scope, item, level.
 
@@ -43,12 +43,12 @@ The installer needs a token that lets it create things in your account.
 
 ### Windows
 
-1. Download or unzip this repository somewhere, for example `C:\relay-lite`.
+1. Download or unzip this repository somewhere, for example `C:\runlet`.
 2. Open **PowerShell** (Start menu, type PowerShell).
 3. Run:
 
    ```
-   cd C:\relay-lite
+   cd C:\runlet
    Set-ExecutionPolicy -Scope Process Bypass
    .\install.ps1
    ```
@@ -66,7 +66,7 @@ The installer needs a token that lets it create things in your account.
 ### Linux
 
 ```
-cd relay-lite
+cd runlet
 ./install.sh
 ```
 
@@ -90,7 +90,7 @@ The assistant learns how the tools work from the tools themselves; nothing
 more is required. If you want it to behave a particular way, put a note in
 the chat's project instructions or custom instructions. A sensible one:
 
-> You can run shell commands on my computer with the relay-lite connector.
+> You can run shell commands on my computer with the runlet connector.
 > Commands run as me, one at a time, in a fresh shell each time. Prefer
 > read-only commands; ask before anything that changes or deletes files.
 > For long jobs, pass a short wait and fetch the result later, or
@@ -99,13 +99,13 @@ the chat's project instructions or custom instructions. A sensible one:
 ## Afterwards
 
 - The runner keeps working after reboots; nothing to start by hand.
-- To stop it: `systemctl --user stop relay-lite` inside Ubuntu.
+- To stop it: `systemctl --user stop runlet` inside Ubuntu.
   To remove it entirely, also delete the Worker and the database in the
   Cloudflare dashboard.
-- Lost the address? It is in `~/.config/relay-lite/env` inside Ubuntu, on
-  the `RELAY_WORKER_URL` and `RELAY_URL_SECRET` lines: the address is
-  `<RELAY_WORKER_URL>/<RELAY_URL_SECRET>/mcp`.
-- Want a new address (say it leaked)? Delete the `RELAY_URL_SECRET` line
+- Lost the address? It is in `~/.config/runlet/env` inside Ubuntu, on
+  the `RUNLET_WORKER_URL` and `RUNLET_URL_SECRET` lines: the address is
+  `<RUNLET_WORKER_URL>/<RUNLET_URL_SECRET>/mcp`.
+- Want a new address (say it leaked)? Delete the `RUNLET_URL_SECRET` line
   from that file and run the installer again.
 - Something went wrong? Run the installer again; it is safe to repeat and
-  picks up where it left off. The log is `journalctl --user -u relay-lite`.
+  picks up where it left off. The log is `journalctl --user -u runlet`.

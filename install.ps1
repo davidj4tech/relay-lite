@@ -1,4 +1,4 @@
-# install.ps1 — relay-lite on Windows: make sure WSL2 + Ubuntu exist, then run
+# install.ps1 — runlet on Windows: make sure WSL2 + Ubuntu exist, then run
 # the Linux installer inside it. Run from PowerShell in this folder:
 #
 #     Set-ExecutionPolicy -Scope Process Bypass; .\install.ps1
@@ -38,4 +38,4 @@ if (-not (Test-Path (Join-Path (Get-Location).Path 'install.conf'))) {
 $here = (Get-Location).Path
 $wslHere = (wsl.exe -d $distro -e wslpath -a ($here -replace '\\', '/')).Trim()
 Write-Host "==> Running the installer inside $distro at $wslHere"
-wsl.exe -d $distro -e bash -lc "cd '$wslHere' && chmod +x install.sh relay-lite.sh && ./install.sh"
+wsl.exe -d $distro -e bash -lc "cd '$wslHere' && chmod +x install.sh runlet.sh && ./install.sh"

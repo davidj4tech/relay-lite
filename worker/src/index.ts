@@ -1,5 +1,5 @@
 /**
- * relay-lite — the smallest relay that works.
+ * runlet — the smallest relay that works.
  *
  * One MCP server, two tools: run_command queues a shell command for a runner
  * on your machine and waits for its result; get_result fetches a result the
@@ -10,29 +10,29 @@
  * ##  Whoever can reach this Worker's URL can run arbitrary shell on the   ##
  * ##  runner host. Two things stand in the way:                            ##
  * ##                                                                       ##
- * ##   1. The URL secret. The MCP endpoint is /<RELAY_URL_SECRET>/mcp, and ##
+ * ##   1. The URL secret. The MCP endpoint is /<RUNLET_URL_SECRET>/mcp, and ##
  * ##      any other path is 404. Treat that URL like a password: it goes   ##
  * ##      into the connector settings of ONE assistant and nowhere else.   ##
- * ##   2. HMAC. Every row is signed with RELAY_HMAC_KEY, held only here    ##
+ * ##   2. HMAC. Every row is signed with RUNLET_HMAC_KEY, held only here    ##
  * ##      and on the runner. Database access alone cannot make the runner ##
  * ##      execute anything.                                                ##
  * ###########################################################################
  *
  * The signature is byte-for-byte the v1 scheme of tmux-relay's runner
  * (nonce + "\n" + command, HMAC-SHA256 keyed with the ASCII hex key), so
- * relay-lite.sh and tmux-relay's d1-runner.sh agree; tests/vectors.json in that
+ * runlet.sh and tmux-relay's d1-runner.sh agree; tests/vectors.json in that
  * repo pins it.
  */
 
 interface Env {
   DB: D1Database
   /** Hex key shared with the runner (relay.key). Set with `wrangler secret put`. */
-  RELAY_HMAC_KEY: string
+  RUNLET_HMAC_KEY: string
   /** The path secret. Set with `wrangler secret put`. */
-  RELAY_URL_SECRET: string
+  RUNLET_URL_SECRET: string
   /** Seconds run_command waits by default / at most. */
-  RELAY_WAIT_DEFAULT?: string
-  RELAY_WAIT_MAX?: string
+  RUNLET_WAIT_DEFAULT?: string
+  RUNLET_WAIT_MAX?: string
 }
 
 const PROTOCOL_VERSION = '2025-06-18'
@@ -78,7 +78,7 @@ const TOOLS = [
       '- The result starts with "#<id> <status> exit=<code>" then the output. ' +
       'Status done means it ran; check exit= before trusting the output.\n' +
       '- Commands run ONE AT A TIME in the order queued (unless the host set ' +
-      'RELAY_PARALLEL), so a long command holds everything behind it -- unless ' +
+      'RUNLET_PARALLEL), so a long command holds everything behind it -- unless ' +
       'you pass background=true, which lets that one run alongside the queue.\n' +
       '- For anything long: pass background=true and a short wait, note the id, ' +
       'and call get_result with a wait when you want the output. Meanwhile other ' +
@@ -194,7 +194,7 @@ async function awaitRow(env: Env, id: number, waitSeconds: number): Promise<{ ro
 }
 
 function clampWait(env: Env, asked: unknown, fallback: number): number {
-  const max = Number(env.RELAY_WAIT_MAX ?? 120)
+  const max = Number(env.RUNLET_WAIT_MAX ?? 120)
   const n = Number(asked ?? fallback)
   return Math.min(Math.max(Number.isFinite(n) ? n : fallback, 0), max)
 }
@@ -204,7 +204,7 @@ function clampWait(env: Env, asked: unknown, fallback: number): number {
 // most start a signed command sooner.
 async function enqueue(env: Env, command: string, waitSeconds: number, background: boolean): Promise<{ row: Row; timedOut: boolean }> {
   const nonce = randomHex(16)
-  const sig = await hmacHex(env.RELAY_HMAC_KEY, `${nonce}\n${command}`)
+  const sig = await hmacHex(env.RUNLET_HMAC_KEY, `${nonce}\n${command}`)
   const ins = await env.DB.prepare(
     `INSERT INTO commands (command, status, sig, nonce, background, created_at, updated_at)
      VALUES (?, 'pending', ?, ?, ?, datetime('now'), datetime('now'))`,
@@ -222,7 +222,7 @@ export default {
     // The path IS the credential. Constant-time compare, and every miss is a
     // plain 404 so the endpoint cannot be found by probing.
     const parts = url.pathname.split('/').filter(Boolean)
-    if (parts.length !== 2 || parts[1] !== 'mcp' || !env.RELAY_URL_SECRET || !timingSafeEqual(parts[0], env.RELAY_URL_SECRET)) {
+    if (parts.length !== 2 || parts[1] !== 'mcp' || !env.RUNLET_URL_SECRET || !timingSafeEqual(parts[0], env.RUNLET_URL_SECRET)) {
       return new Response('not found', { status: 404 })
     }
     if (request.method !== 'POST') return new Response('POST JSON-RPC here', { status: 405 })
@@ -241,7 +241,7 @@ export default {
         return rpc(id, {
           protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
           capabilities: { tools: {} },
-          serverInfo: { name: 'relay-lite', version: '0.1.0' },
+          serverInfo: { name: 'runlet', version: '0.1.0' },
         })
       case 'ping':
         return rpc(id, {})
@@ -254,7 +254,7 @@ export default {
           const command = String(args.command ?? '')
           if (!command.trim()) return toolText(id, 'run_command needs a command.', true)
           if (command.length > MAX_COMMAND_CHARS) return toolText(id, `Command is ${command.length} characters; the limit is ${MAX_COMMAND_CHARS}.`, true)
-          const wait = clampWait(env, args.wait, Number(env.RELAY_WAIT_DEFAULT ?? 30))
+          const wait = clampWait(env, args.wait, Number(env.RUNLET_WAIT_DEFAULT ?? 30))
           const r = await enqueue(env, command, wait, args.background === true)
           return toolText(id, render(r.row, r.timedOut), !r.timedOut && FAILED.includes(r.row.status))
         }
@@ -267,7 +267,7 @@ export default {
           // Still queued: it never starts. The runner claims only 'pending'
           // rows, so flipping the status here is enough and needs no runner.
           const q = await env.DB.prepare(
-            `UPDATE commands SET status = 'cancelled', exit_code = -1, output = 'relay-lite: cancelled before it started', updated_at = datetime('now')
+            `UPDATE commands SET status = 'cancelled', exit_code = -1, output = 'runlet: cancelled before it started', updated_at = datetime('now')
               WHERE id = ? AND status = 'pending'`,
           ).bind(rid).run()
           if (q.meta.changes === 1) return toolText(id, `#${rid} cancelled before it started.`)

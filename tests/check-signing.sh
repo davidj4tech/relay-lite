@@ -11,14 +11,14 @@ V="$HERE/vectors.json"
 KEY=$(jq -r '.key' "$V")
 fail=0 n=0
 
-# --- the runner side, through relay-lite.sh's own `sign` --------------------
+# --- the runner side, through runlet.sh's own `sign` --------------------
 # Fields joined with US (0x1f), not tabs: `read` collapses an empty field
 # between tabs (the empty-command vector). The trailing X keeps a command's
 # trailing newline through $(...), which strips them.
 while IFS=$'\x1f' read -r name nonce cmd_b64 expected; do
   n=$(( n + 1 ))
   cmd=$(printf '%s' "$cmd_b64" | base64 -d; printf X); cmd="${cmd%X}"
-  got=$(RELAY_KEY="$KEY" "$HERE/../relay-lite.sh" sign "$nonce" "$cmd")
+  got=$(RUNLET_KEY="$KEY" "$HERE/../runlet.sh" sign "$nonce" "$cmd")
   if [[ "$got" == "$expected" ]]; then echo "  runner  ok    $name"
   else echo "  runner  FAIL  $name: got $got"; fail=1; fi
 done < <(jq -r '.vectors[] | [.name, .nonce, .command_b64, .expected] | join("")' "$V")

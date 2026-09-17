@@ -1,4 +1,4 @@
-# relay-lite
+# runlet
 
 Let an AI assistant run shell commands on your computer and read the results,
 through a tiny Cloudflare Worker, with one command to set it up.
@@ -6,7 +6,7 @@ through a tiny Cloudflare Worker, with one command to set it up.
 ```
 assistant  ──MCP──▶  Worker (Cloudflare)  ──▶  signed row in D1
                                                     ▲
-your machine ◀──── relay-lite.sh polls, verifies, runs, writes the result
+your machine ◀──── runlet.sh polls, verifies, runs, writes the result
 ```
 
 Two tools: `run_command` (queue a command and wait for its output) and
@@ -44,18 +44,18 @@ The short version, for someone who has done this before:
 The installer creates the D1 database, applies the schema, registers a
 workers.dev subdomain if the account has none, generates the signing key and
 the URL secret, sets both as Worker secrets, deploys the Worker, runs an
-end-to-end smoke test, writes `~/.config/relay-lite/{env,relay.key}` and
+end-to-end smoke test, writes `~/.config/runlet/{env,relay.key}` and
 starts the runner as a systemd user service. Re-running is safe: it keeps
 existing ids and keys. Several machines can share one account: each gets a
-Worker and database named `relay-lite-<site>` (default: the hostname). Copy
+Worker and database named `runlet-<site>` (default: the hostname). Copy
 `install.conf.example` to `install.conf` to answer the prompts in advance.
 
 ## What keeps this safe enough
 
 - **The URL is the credential.** The endpoint is `/<secret>/mcp`; every
   other path is a 404, compared in constant time. Give it to one assistant.
-  Rotate it by deleting the `RELAY_URL_SECRET` line from
-  `~/.config/relay-lite/env` and re-running the installer.
+  Rotate it by deleting the `RUNLET_URL_SECRET` line from
+  `~/.config/runlet/env` and re-running the installer.
 - **Rows are signed.** HMAC-SHA256 over the nonce and the command, keyed
   with a secret the Worker and the runner share and nothing else holds. The
   runner refuses a row that does not verify, and a nonce it has seen before.
@@ -63,7 +63,7 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   output kept.
 - **One at a time, by default.** The runner finishes each command before it
   starts the next, so a long job holds the queue behind it and nothing
-  interleaves. `RELAY_PARALLEL=4` in `~/.config/relay-lite/env` (re-read
+  interleaves. `RUNLET_PARALLEL=4` in `~/.config/runlet/env` (re-read
   every poll, so it takes effect within seconds, no restart) runs up to
   four at once, each in its own process; results then land in whatever
   order they finish.
@@ -71,25 +71,25 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   `background: true` starts that one alongside the queue, so a build or a
   download does not hold up the quick command after it; the assistant
   fetches its output later with `get_result` and a `wait`. The owner caps
-  how many such jobs run at once (`RELAY_BACKGROUND_MAX`, default 4).
+  how many such jobs run at once (`RUNLET_BACKGROUND_MAX`, default 4).
   `detach` does the same to a command that is already running, so a job
   that turns out slow stops holding the queue without being killed. Every
   command runs in its own process for this reason; the runner looks for a
-  detach every few seconds while it waits on one (`RELAY_DETACH_CHECK`).
+  detach every few seconds while it waits on one (`RUNLET_DETACH_CHECK`).
 - **`cancel` stops a command.** One still queued never starts; one running
   is killed with everything it spawned (it runs as its own process group)
   and its status becomes `cancelled`, with whatever output there was. It
   stops; it does not undo.
-- **A running job shows its output so far.** Every `RELAY_PROGRESS_EVERY`
+- **A running job shows its output so far.** Every `RUNLET_PROGRESS_EVERY`
   seconds (default 10) the runner copies what the job has printed onto the
   row, so `get_result` on a running command returns the partial output.
-- **A load ceiling, off by default.** `RELAY_LOAD_MAX=4` holds new commands
+- **A load ceiling, off by default.** `RUNLET_LOAD_MAX=4` holds new commands
   while the 1-minute load average is above 4; running ones are left alone
   and pending rows wait. Logged when it engages and when it releases.
-- **Each runner signs its name** (hostname, or `RELAY_RUNNER_ID`) on the
+- **Each runner signs its name** (hostname, or `RUNLET_RUNNER_ID`) on the
   rows it claims, and the restart sweep only touches its own, so two
   machines sharing one database cannot mark each other's jobs as failed.
-- **Finished rows are pruned** after `RELAY_KEEP_DAYS` (default 30), once
+- **Finished rows are pruned** after `RUNLET_KEEP_DAYS` (default 30), once
   a day, so the table does not grow forever. Pending and running rows are
   never touched.
 - **A runner restart mid-job** marks the rows it was running as `error`
@@ -97,7 +97,7 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   rather than leaving them `running` forever. A row still `running` well
   past the timeout with no result, which means the runner hung rather than
   restarted, is marked the same way every few minutes.
-- **`relay-lite.sh status`** prints the last ten rows, newest first, with
+- **`runlet.sh status`** prints the last ten rows, newest first, with
   status, time, command and the start of the output: "is it stuck?" as one
   command. `status 30` for more.
 - **`tests/check-signing.sh`** holds the runner's openssl signing and the
@@ -117,13 +117,13 @@ the same signature scheme.
 |---|---|
 | `worker/src/index.ts` | the Worker: MCP over HTTP, two tools, signing, queue-and-wait |
 | `schema.sql` | one table |
-| `relay-lite.sh` | the runner: poll, verify, run, write back |
-| `relay-lite.service` | systemd user unit template |
+| `runlet.sh` | the runner: poll, verify, run, write back |
+| `runlet.service` | systemd user unit template |
 | `install.sh`, `install.ps1` | the one-command setup, Linux/WSL and Windows |
 | `SETUP.md` | the walkthrough for a person |
 
-Runner log: `journalctl --user -u relay-lite -f`. Config:
-`~/.config/relay-lite/env` and `relay.key`.
+Runner log: `journalctl --user -u runlet -f`. Config:
+`~/.config/runlet/env` and `relay.key`.
 
 ## License
 

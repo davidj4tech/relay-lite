@@ -1,4 +1,4 @@
--- relay-lite schema. One table. Applied by install.sh; safe to re-run.
+-- runlet schema. One table. Applied by install.sh; safe to re-run.
 CREATE TABLE IF NOT EXISTS commands (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   command    TEXT    NOT NULL,

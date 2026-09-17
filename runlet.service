@@ -1,14 +1,14 @@
-# relay-lite.service — systemd *user* unit. install.sh writes the real paths
+# runlet.service — systemd *user* unit. install.sh writes the real paths
 # and installs it to ~/.config/systemd/user/, then enables it.
 [Unit]
-Description=relay-lite runner (executes signed commands from the queue)
+Description=runlet runner (executes signed commands from the queue)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=__LITE_DIR__/relay-lite.sh
-EnvironmentFile=-%h/.config/relay-lite/env
+ExecStart=__LITE_DIR__/runlet.sh
+EnvironmentFile=-%h/.config/runlet/env
 Environment=PATH=__LITE_DIR__/worker/node_modules/.bin:__NODE_BIN__:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=10

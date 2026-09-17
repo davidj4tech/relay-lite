@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# relay-lite.sh — poll the queue, run what is signed, write the result back.
+# runlet.sh — poll the queue, run what is signed, write the result back.
 #
 # ############################################################################
 # ##  THIS SCRIPT EXECUTES SHELL COMMANDS READ FROM A DATABASE, as you.     ##
@@ -9,25 +9,25 @@
 # ##  running: only a row signed with relay.key is executed.               ##
 # ############################################################################
 #
-#     relay-lite.sh            # poll forever (the service form)
-#     relay-lite.sh --once     # one poll, for testing
-#     relay-lite.sh status [n] # the last n rows (default 10), newest first
-#     relay-lite.sh sign <nonce> <command>   # the signature this runner expects
+#     runlet.sh            # poll forever (the service form)
+#     runlet.sh --once     # one poll, for testing
+#     runlet.sh status [n] # the last n rows (default 10), newest first
+#     runlet.sh sign <nonce> <command>   # the signature this runner expects
 #
-# Config: ~/.config/relay-lite/env (written by install.sh):
+# Config: ~/.config/runlet/env (written by install.sh):
 #     CLOUDFLARE_API_TOKEN   token wrangler uses to read and write D1
-#     RELAY_DB_NAME          D1 database (default relay-lite)
-#     RELAY_KEY_FILE         hex key shared with the Worker (default relay.key beside env)
-#     RELAY_POLL             seconds between polls (default 5)
-#     RELAY_CMD_TIMEOUT      seconds a command may run (default 600)
-#     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
-#     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
-#     RELAY_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
-#     RELAY_DETACH_CHECK     seconds between looks for a detach or cancel on a running row (default 3)
-#     RELAY_KEEP_DAYS        finished rows older than this are deleted daily (default 30)
-#     RELAY_PROGRESS_EVERY   seconds between copies of a running job's output onto its row (default 10; 0 = off)
-#     RELAY_LOAD_MAX         hold new commands while the 1-min load average is above this (default 0 = off)
-#     RELAY_RUNNER_ID        this runner's name on the rows it claims (default: hostname)
+#     RUNLET_DB_NAME          D1 database (default runlet)
+#     RUNLET_KEY_FILE         hex key shared with the Worker (default relay.key beside env)
+#     RUNLET_POLL             seconds between polls (default 5)
+#     RUNLET_CMD_TIMEOUT      seconds a command may run (default 600)
+#     RUNLET_MAX_OUTPUT       bytes of output kept (default 60000)
+#     RUNLET_PARALLEL         commands run at once (default 1: strictly in order)
+#     RUNLET_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
+#     RUNLET_DETACH_CHECK     seconds between looks for a detach or cancel on a running row (default 3)
+#     RUNLET_KEEP_DAYS        finished rows older than this are deleted daily (default 30)
+#     RUNLET_PROGRESS_EVERY   seconds between copies of a running job's output onto its row (default 10; 0 = off)
+#     RUNLET_LOAD_MAX         hold new commands while the 1-min load average is above this (default 0 = off)
+#     RUNLET_RUNNER_ID        this runner's name on the rows it claims (default: hostname)
 #
 # Every tunable above (not the token, key or database) is re-read from the env
 # file every poll: edit the file and the change is live within one interval.
@@ -39,61 +39,61 @@
 
 set -uo pipefail
 
-CONF_DIR="${RELAY_LITE_CONF:-$HOME/.config/relay-lite}"
+CONF_DIR="${RUNLET_CONF:-$HOME/.config/runlet}"
 if [[ -r "$CONF_DIR/env" ]]; then set -a; . "$CONF_DIR/env"; set +a; fi
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-WRANGLER_CFG="${RELAY_WRANGLER_CONFIG:-$HERE/worker/wrangler.jsonc}"
-DB="${RELAY_DB_NAME:-relay-lite}"
-KEY_FILE="${RELAY_KEY_FILE:-$CONF_DIR/relay.key}"
-POLL="${RELAY_POLL:-5}"
-CMD_TIMEOUT="${RELAY_CMD_TIMEOUT:-600}"
-MAX_OUTPUT="${RELAY_MAX_OUTPUT:-60000}"
+WRANGLER_CFG="${RUNLET_WRANGLER_CONFIG:-$HERE/worker/wrangler.jsonc}"
+DB="${RUNLET_DB_NAME:-runlet}"
+KEY_FILE="${RUNLET_KEY_FILE:-$CONF_DIR/relay.key}"
+POLL="${RUNLET_POLL:-5}"
+CMD_TIMEOUT="${RUNLET_CMD_TIMEOUT:-600}"
+MAX_OUTPUT="${RUNLET_MAX_OUTPUT:-60000}"
 # 1 = serial, the default: each command finishes before the next starts, so
 # nothing interleaves and a long job is easy to spot. Higher = that many at
 # once, each in its own process; outputs then land in whatever order they
 # finish, and jobs compete for the machine. Set it knowingly.
-PARALLEL="${RELAY_PARALLEL:-1}"
+PARALLEL="${RUNLET_PARALLEL:-1}"
 [[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || PARALLEL=1
 # How many rows flagged background=true may run at once, whatever PARALLEL
 # says. They are the assistant's choice per command; this is the owner's
 # ceiling on that choice.
-BACKGROUND_MAX="${RELAY_BACKGROUND_MAX:-4}"
+BACKGROUND_MAX="${RUNLET_BACKGROUND_MAX:-4}"
 [[ "$BACKGROUND_MAX" =~ ^[1-9][0-9]*$ ]] || BACKGROUND_MAX=4
 # Seconds between looks at whether a running foreground row was detached.
-DETACH_CHECK="${RELAY_DETACH_CHECK:-3}"
+DETACH_CHECK="${RUNLET_DETACH_CHECK:-3}"
 [[ "$DETACH_CHECK" =~ ^[1-9][0-9]*$ ]] || DETACH_CHECK=3
 # Seconds between copies of a running job's output onto its row (0 = never).
-PROGRESS_EVERY="${RELAY_PROGRESS_EVERY:-10}"
+PROGRESS_EVERY="${RUNLET_PROGRESS_EVERY:-10}"
 [[ "$PROGRESS_EVERY" =~ ^[0-9]+$ ]] || PROGRESS_EVERY=10
 # Do not START new commands while the 1-minute load average is above this
 # (0 = no ceiling). Running ones are left alone; pending rows wait.
-LOAD_MAX="${RELAY_LOAD_MAX:-0}"
+LOAD_MAX="${RUNLET_LOAD_MAX:-0}"
 [[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] || LOAD_MAX=0
 # Who claims rows. Written onto the row so the orphan sweep at startup only
 # touches rows THIS runner was running, and two runners on one database
 # cannot sweep each other.
-RUNNER_ID="${RELAY_RUNNER_ID:-$(hostname -s 2>/dev/null || hostname)}"
+RUNNER_ID="${RUNLET_RUNNER_ID:-$(hostname -s 2>/dev/null || hostname)}"
 # Finished rows older than this many days are deleted, once a day.
-KEEP_DAYS="${RELAY_KEEP_DAYS:-30}"
+KEEP_DAYS="${RUNLET_KEEP_DAYS:-30}"
 [[ "$KEEP_DAYS" =~ ^[1-9][0-9]*$ ]] || KEEP_DAYS=30
 LAST_PRUNE=-100000
 LAST_STALE=-100000
 LOAD_HELD=0
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite"
-SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/runlet"
+SEEN="${RUNLET_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/runlet/nonces}"
 
-log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
+log() { printf '%s runlet: %s\n' "$(date '+%F %T')" "$*" >&2; }
 
 for dep in jq openssl timeout; do
   command -v "$dep" >/dev/null 2>&1 || { log "missing dependency: $dep"; exit 1; }
 done
 
 # `sign <nonce> <command>`: print the signature this runner would expect,
-# using the key in RELAY_KEY_FILE (or RELAY_KEY). For tests/check-signing.sh,
+# using the key in RUNLET_KEY_FILE (or RUNLET_KEY). For tests/check-signing.sh,
 # which holds this and the Worker's implementation to one set of vectors.
 if [[ "${1:-}" == sign ]]; then
-  KEY="${RELAY_KEY:-$(tr -d '[:space:]' < "$KEY_FILE" 2>/dev/null)}"
-  [[ -n "$KEY" ]] || { echo "relay-lite sign: no key (RELAY_KEY or $KEY_FILE)" >&2; exit 1; }
+  KEY="${RUNLET_KEY:-$(tr -d '[:space:]' < "$KEY_FILE" 2>/dev/null)}"
+  [[ -n "$KEY" ]] || { echo "runlet sign: no key (RUNLET_KEY or $KEY_FILE)" >&2; exit 1; }
   printf '%s\n%s' "$2" "$3" | openssl dgst -sha256 -mac HMAC -macopt "key:$KEY" -r 2>/dev/null | cut -d' ' -f1
   exit 0
 fi
@@ -137,12 +137,12 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
   # Nonce seen before = a replayed row (someone re-inserted a signed row).
   if grep -qxF -- "$nonce" "$SEEN" 2>/dev/null; then
     log "#$id: nonce already used — rejecting as a replay"
-    write_result "$id" rejected -1 "relay-lite: replayed nonce"; return
+    write_result "$id" rejected -1 "runlet: replayed nonce"; return
   fi
   expected=$(hmac "$nonce" "$command")
   if ! ct_equal "$expected" "$sig"; then
     log "#$id: BAD SIGNATURE — not executing"
-    write_result "$id" rejected -1 "relay-lite: signature did not verify"; return
+    write_result "$id" rejected -1 "runlet: signature did not verify"; return
   fi
   # Claim it. `AND status = 'pending'` means only one runner can win.
   claimed=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
@@ -162,7 +162,7 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
 }
 
 # Watch a running job for a cancel, and (in the foreground) for a detach.
-# Every RELAY_DETACH_CHECK seconds it reads the row's two flags -- one D1
+# Every RUNLET_DETACH_CHECK seconds it reads the row's two flags -- one D1
 # read, so a short command never pays for it. A cancel kills the job's whole
 # process group and lets execute_and_write record the outcome. A detach in
 # the foreground hands the watching over to a background copy of this loop
@@ -224,11 +224,11 @@ execute_and_write() {  # $1 = id, $2 = command
   if [[ -e "$STATE_DIR/cancel.$id" ]]; then
     rm -f "$STATE_DIR/cancel.$id"
     write_result "$id" cancelled -1 "$out
-relay-lite: cancelled after it had started; whatever it did before that is done"
+runlet: cancelled after it had started; whatever it did before that is done"
     log "#$id: cancelled, ${#out} bytes of output kept"
   elif (( rc == 124 || rc == 137 )); then
     write_result "$id" timeout "$rc" "$out
-relay-lite: killed after ${CMD_TIMEOUT}s"
+runlet: killed after ${CMD_TIMEOUT}s"
     log "#$id: timed out"
   else
     write_result "$id" done "$rc" "$out"
@@ -236,7 +236,7 @@ relay-lite: killed after ${CMD_TIMEOUT}s"
   fi
 }
 
-# Finished rows older than RELAY_KEEP_DAYS go. The table is the only thing
+# Finished rows older than RUNLET_KEEP_DAYS go. The table is the only thing
 # here that grows without bound, and nothing reads an old result. Runs at
 # start and then once a day; rows still pending or running are never touched.
 prune_old() {
@@ -257,7 +257,7 @@ prune_old() {
 sweep_orphans() {
   local n
   n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running' AND (runner = '$(sql_lit "$RUNNER_ID")' OR runner IS NULL);" 2>/dev/null \
+        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running' AND (runner = '$(sql_lit "$RUNNER_ID")' OR runner IS NULL);" 2>/dev/null \
       | jq -r '.[0].meta.changes // 0' 2>/dev/null)
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n orphaned 'running' row(s) of runner '$RUNNER_ID' as error"
   return 0
@@ -272,7 +272,7 @@ sweep_orphans() {
 sweep_stale() {
   local n
   n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: ran past the timeout without reporting; the runner may have hung', updated_at = datetime('now') WHERE status = 'running' AND runner = '$(sql_lit "$RUNNER_ID")' AND updated_at < datetime('now', '-$(( CMD_TIMEOUT + 120 )) seconds');" 2>/dev/null \
+        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'runlet: ran past the timeout without reporting; the runner may have hung', updated_at = datetime('now') WHERE status = 'running' AND runner = '$(sql_lit "$RUNNER_ID")' AND updated_at < datetime('now', '-$(( CMD_TIMEOUT + 120 )) seconds');" 2>/dev/null \
       | jq -r '.[0].meta.changes // 0' 2>/dev/null)
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n stale 'running' row(s) as error"
   LAST_STALE=$SECONDS
@@ -280,27 +280,27 @@ sweep_stale() {
 }
 
 # Settings that may change while the runner is up are re-read every poll, so
-# editing ~/.config/relay-lite/env takes effect within one poll interval and
+# editing ~/.config/runlet/env takes effect within one poll interval and
 # no restart is needed. Only these: the token, key and database stay as
 # loaded, because changing those under a running job is not "on the fly".
 reload_tunables() {
   local v
   [[ -r "$CONF_DIR/env" ]] || return 0
-  v=$(sed -n 's/^RELAY_PARALLEL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$PARALLEL" ]]; then log "RELAY_PARALLEL now $v (was $PARALLEL)"; PARALLEL="$v"; fi
-  v=$(sed -n 's/^RELAY_CMD_TIMEOUT=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$CMD_TIMEOUT" ]]; then log "RELAY_CMD_TIMEOUT now ${v}s (was ${CMD_TIMEOUT}s)"; CMD_TIMEOUT="$v"; fi
-  v=$(sed -n 's/^RELAY_POLL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$POLL" ]]; then log "RELAY_POLL now ${v}s (was ${POLL}s)"; POLL="$v"; fi
-  v=$(sed -n 's/^RELAY_BACKGROUND_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$BACKGROUND_MAX" ]]; then log "RELAY_BACKGROUND_MAX now $v (was $BACKGROUND_MAX)"; BACKGROUND_MAX="$v"; fi
-  v=$(sed -n 's/^RELAY_PROGRESS_EVERY=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[0-9]+$ && "$v" != "$PROGRESS_EVERY" ]]; then log "RELAY_PROGRESS_EVERY now ${v}s (was ${PROGRESS_EVERY}s)"; PROGRESS_EVERY="$v"; fi
-  v=$(sed -n 's/^RELAY_KEEP_DAYS=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
-  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$KEEP_DAYS" ]]; then log "RELAY_KEEP_DAYS now $v (was $KEEP_DAYS)"; KEEP_DAYS="$v"; fi
+  v=$(sed -n 's/^RUNLET_PARALLEL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$PARALLEL" ]]; then log "RUNLET_PARALLEL now $v (was $PARALLEL)"; PARALLEL="$v"; fi
+  v=$(sed -n 's/^RUNLET_CMD_TIMEOUT=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$CMD_TIMEOUT" ]]; then log "RUNLET_CMD_TIMEOUT now ${v}s (was ${CMD_TIMEOUT}s)"; CMD_TIMEOUT="$v"; fi
+  v=$(sed -n 's/^RUNLET_POLL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$POLL" ]]; then log "RUNLET_POLL now ${v}s (was ${POLL}s)"; POLL="$v"; fi
+  v=$(sed -n 's/^RUNLET_BACKGROUND_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$BACKGROUND_MAX" ]]; then log "RUNLET_BACKGROUND_MAX now $v (was $BACKGROUND_MAX)"; BACKGROUND_MAX="$v"; fi
+  v=$(sed -n 's/^RUNLET_PROGRESS_EVERY=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[0-9]+$ && "$v" != "$PROGRESS_EVERY" ]]; then log "RUNLET_PROGRESS_EVERY now ${v}s (was ${PROGRESS_EVERY}s)"; PROGRESS_EVERY="$v"; fi
+  v=$(sed -n 's/^RUNLET_KEEP_DAYS=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$KEEP_DAYS" ]]; then log "RUNLET_KEEP_DAYS now $v (was $KEEP_DAYS)"; KEEP_DAYS="$v"; fi
   # Absent line = ceiling off, so removing it releases a hold.
-  v=$(sed -n 's/^RELAY_LOAD_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"''); [[ -n "$v" ]] || v=0
-  if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ && "$v" != "$LOAD_MAX" ]]; then log "RELAY_LOAD_MAX now $v (was $LOAD_MAX)"; LOAD_MAX="$v"; fi
+  v=$(sed -n 's/^RUNLET_LOAD_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"''); [[ -n "$v" ]] || v=0
+  if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ && "$v" != "$LOAD_MAX" ]]; then log "RUNLET_LOAD_MAX now $v (was $LOAD_MAX)"; LOAD_MAX="$v"; fi
 }
 
 poll() {
@@ -309,7 +309,7 @@ poll() {
   if [[ "$LOAD_MAX" != 0 ]]; then
     load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
     if awk -v l="$load" -v m="$LOAD_MAX" 'BEGIN { exit !(l > m) }'; then
-      (( LOAD_HELD )) || log "load average $load is over RELAY_LOAD_MAX=$LOAD_MAX — not starting new commands until it drops"
+      (( LOAD_HELD )) || log "load average $load is over RUNLET_LOAD_MAX=$LOAD_MAX — not starting new commands until it drops"
       LOAD_HELD=1; return 0
     fi
     (( LOAD_HELD )) && log "load average $load is back under $LOAD_MAX — resuming"
@@ -331,7 +331,7 @@ poll() {
     cmd=$(jq -j ".[$i].command" <<<"$rows"; printf X); cmd="${cmd%X}"
     if [[ "$bg" == 1 ]]; then
       # Asked to run alongside the queue (run_command background=true). Its
-      # own cap, RELAY_BACKGROUND_MAX, independent of RELAY_PARALLEL: the
+      # own cap, RUNLET_BACKGROUND_MAX, independent of RUNLET_PARALLEL: the
       # queue stays serial while a long job runs beside it.
       while (( $(jobs -rp | wc -l) >= BACKGROUND_MAX )); do sleep 0.5; done
       run_one "$id" "$cmd" "$sig" "$nonce" bg &

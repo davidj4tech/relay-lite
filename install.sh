@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — relay-lite, from a Cloudflare API token to a running runner.
+# install.sh — runlet, from a Cloudflare API token to a running runner.
 #
 #     ./install.sh                 # interactive: asks for the token if not in env
 #     CLOUDFLARE_API_TOKEN=... ./install.sh
@@ -17,7 +17,7 @@
 # From that token this script: finds the account, creates the D1 database,
 # applies the schema, registers a workers.dev subdomain if the account has
 # none, generates the HMAC key and the URL secret, sets both as Worker
-# secrets, deploys the Worker, writes ~/.config/relay-lite/{env,relay.key},
+# secrets, deploys the Worker, writes ~/.config/runlet/{env,relay.key},
 # and starts the runner as a systemd user service. Re-running is safe: every
 # step checks before it creates.
 #
@@ -27,23 +27,23 @@
 
 set -euo pipefail
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-CONF="$HOME/.config/relay-lite"
+CONF="$HOME/.config/runlet"
 NO_SERVICE=0
 [[ "${1:-}" == "--no-service" ]] && NO_SERVICE=1
 
 # install.conf beside this script, if present, answers the questions in
 # advance so the person running it types nothing: CLOUDFLARE_API_TOKEN,
-# CLOUDFLARE_ACCOUNT_ID (optional), RELAY_SITE. Copy install.conf.example.
+# CLOUDFLARE_ACCOUNT_ID (optional), RUNLET_SITE. Copy install.conf.example.
 if [[ -r "$HERE/install.conf" ]]; then set -a; . "$HERE/install.conf"; set +a; fi
 
-# One account can hold several of these (one per machine). RELAY_SITE names
+# One account can hold several of these (one per machine). RUNLET_SITE names
 # this one; it goes into the Worker and database names so they never
 # collide. Default: this machine's hostname.
-RELAY_SITE="${RELAY_SITE:-$(hostname -s 2>/dev/null || hostname)}"
-RELAY_SITE=$(printf '%s' "$RELAY_SITE" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-\n' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
-[[ -n "$RELAY_SITE" ]] || RELAY_SITE=site
-WORKER_NAME="${RELAY_WORKER_NAME:-relay-lite-$RELAY_SITE}"
-DB_NAME="${RELAY_DB_NAME:-relay-lite-$RELAY_SITE}"
+RUNLET_SITE="${RUNLET_SITE:-$(hostname -s 2>/dev/null || hostname)}"
+RUNLET_SITE=$(printf '%s' "$RUNLET_SITE" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-\n' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
+[[ -n "$RUNLET_SITE" ]] || RUNLET_SITE=site
+WORKER_NAME="${RUNLET_WORKER_NAME:-runlet-$RUNLET_SITE}"
+DB_NAME="${RUNLET_DB_NAME:-runlet-$RUNLET_SITE}"
 API=https://api.cloudflare.com/client/v4
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -75,7 +75,7 @@ WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
 note "wrangler $("$WRANGLER" --version 2>/dev/null | tail -1)"
 
 # --- 2. the token ----------------------------------------------------------
-say "Cloudflare API token (site: $RELAY_SITE -> Worker $WORKER_NAME, database $DB_NAME)"
+say "Cloudflare API token (site: $RUNLET_SITE -> Worker $WORKER_NAME, database $DB_NAME)"
 if [[ -z "${CLOUDFLARE_API_TOKEN:-}" && -r "$CONF/env" ]]; then
   CLOUDFLARE_API_TOKEN=$(sed -n 's/^CLOUDFLARE_API_TOKEN=//p' "$CONF/env" | tail -1)
 fi
@@ -86,7 +86,7 @@ if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
       1. Sign in at https://dash.cloudflare.com (a free account is enough).
       2. Open https://dash.cloudflare.com/profile/api-tokens
          -> Create Token -> Create Custom Token (Get started).
-      3. Name it relay-lite and add three permissions, all "Account":
+      3. Name it runlet and add three permissions, all "Account":
             Workers Scripts   Edit
             D1                Edit
             Account Settings  Read
@@ -145,14 +145,14 @@ mkdir -p "$CONF"; chmod 700 "$CONF"
 if [[ ! -s "$CONF/relay.key" ]]; then
   openssl rand -hex 32 > "$CONF/relay.key"; chmod 600 "$CONF/relay.key"; note "generated relay.key"
 else note "relay.key exists, keeping it"; fi
-if [[ -r "$CONF/env" ]] && URL_SECRET=$(sed -n 's/^RELAY_URL_SECRET=//p' "$CONF/env" | tail -1) && [[ -n "$URL_SECRET" ]]; then
+if [[ -r "$CONF/env" ]] && URL_SECRET=$(sed -n 's/^RUNLET_URL_SECRET=//p' "$CONF/env" | tail -1) && [[ -n "$URL_SECRET" ]]; then
   note "URL secret exists, keeping it"
 else
   URL_SECRET=$(openssl rand -hex 24); note "generated the URL secret"
 fi
 ( cd "$HERE/worker" \
-  && tr -d '[:space:]' < "$CONF/relay.key" | "$WRANGLER" secret put RELAY_HMAC_KEY >/dev/null \
-  && printf '%s' "$URL_SECRET" | "$WRANGLER" secret put RELAY_URL_SECRET >/dev/null ) || die "setting Worker secrets failed"
+  && tr -d '[:space:]' < "$CONF/relay.key" | "$WRANGLER" secret put RUNLET_HMAC_KEY >/dev/null \
+  && printf '%s' "$URL_SECRET" | "$WRANGLER" secret put RUNLET_URL_SECRET >/dev/null ) || die "setting Worker secrets failed"
 note "Worker secrets set"
 
 # --- 6. workers.dev subdomain, then deploy ----------------------------------
@@ -170,21 +170,21 @@ WORKER_URL="https://$WORKER_NAME.$sub.workers.dev"
 # --- 7. local config ---------------------------------------------------------
 say "Writing $CONF/env"
 cat > "$CONF/env" <<EOF
-# relay-lite — written by install.sh $(date +%F). The token here is what the
+# runlet — written by install.sh $(date +%F). The token here is what the
 # runner uses to read and write the queue; keep this file private.
 CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID=$ACCOUNT_ID
-RELAY_SITE=$RELAY_SITE
-RELAY_WORKER_NAME=$WORKER_NAME
-RELAY_DB_NAME=$DB_NAME
-RELAY_KEY_FILE=$CONF/relay.key
-RELAY_URL_SECRET=$URL_SECRET
-RELAY_WORKER_URL=$WORKER_URL
-RELAY_POLL=5
-RELAY_CMD_TIMEOUT=600
+RUNLET_SITE=$RUNLET_SITE
+RUNLET_WORKER_NAME=$WORKER_NAME
+RUNLET_DB_NAME=$DB_NAME
+RUNLET_KEY_FILE=$CONF/relay.key
+RUNLET_URL_SECRET=$URL_SECRET
+RUNLET_WORKER_URL=$WORKER_URL
+RUNLET_POLL=5
+RUNLET_CMD_TIMEOUT=600
 EOF
 chmod 600 "$CONF/env"
-chmod +x "$HERE/relay-lite.sh"
+chmod +x "$HERE/runlet.sh"
 
 # --- 8. smoke test: queue a row the way the Worker does, run it once ---------
 say "Smoke test"
@@ -193,24 +193,24 @@ say "Smoke test"
 resp=""
 for i in $(seq 1 12); do
   resp=$(curl -fsS -X POST "$WORKER_URL/$URL_SECRET/mcp" -H 'Content-Type: application/json' \
-    --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"echo relay-lite-ok","wait":0}}}' 2>/dev/null) && break
+    --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"echo runlet-ok","wait":0}}}' 2>/dev/null) && break
   note "waiting for the deploy to propagate ($((i*5))s)"; sleep 5
 done
 [[ -n "$resp" ]] || die "the Worker did not answer at $WORKER_URL/<secret>/mcp after a minute"
 rid=$(jq -r '.result.content[0].text' <<<"$resp" | grep -oE '^#[0-9]+' | tr -d '#')
 [[ -n "$rid" ]] || die "unexpected Worker reply: $resp"
-"$HERE/relay-lite.sh" --once 2>&1 | sed 's/^/    /'
+"$HERE/runlet.sh" --once 2>&1 | sed 's/^/    /'
 # get_result with a wait: if a service is already running it may have taken
 # the row before the one-shot poll above, and still be on it.
 got=$(curl -fsS -X POST "$WORKER_URL/$URL_SECRET/mcp" -H 'Content-Type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_result\",\"arguments\":{\"id\":$rid,\"wait\":60}}}" \
   | jq -r '.result.content[0].text')
-grep -q 'relay-lite-ok' <<<"$got" || die "smoke test failed; the runner did not produce the result: $got"
+grep -q 'runlet-ok' <<<"$got" || die "smoke test failed; the runner did not produce the result: $got"
 note "queued #$rid, ran it, read the output back: OK"
 
 # --- 9. the service ----------------------------------------------------------
 if (( NO_SERVICE )); then
-  say "Not starting the service (--no-service). Run it with: $HERE/relay-lite.sh"
+  say "Not starting the service (--no-service). Run it with: $HERE/runlet.sh"
 else
   say "Starting the runner as a systemd user service"
   if ! systemctl --user show-environment >/dev/null 2>&1; then
@@ -218,19 +218,19 @@ else
       note "systemd is not running in this WSL distro. Enabling it in /etc/wsl.conf."
       printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null
       note "From PowerShell run:  wsl --shutdown   then open the distro again and re-run ./install.sh"
-      note "Until then, run the runner by hand: $HERE/relay-lite.sh"
+      note "Until then, run the runner by hand: $HERE/runlet.sh"
     else
-      note "systemd user session not available; run the runner by hand: $HERE/relay-lite.sh"
+      note "systemd user session not available; run the runner by hand: $HERE/runlet.sh"
     fi
   else
     mkdir -p "$HOME/.config/systemd/user"
-    sed -e "s|__LITE_DIR__|$HERE|g" -e "s|__NODE_BIN__|$NODE_BIN|g" "$HERE/relay-lite.service" \
-      > "$HOME/.config/systemd/user/relay-lite.service"
+    sed -e "s|__LITE_DIR__|$HERE|g" -e "s|__NODE_BIN__|$NODE_BIN|g" "$HERE/runlet.service" \
+      > "$HOME/.config/systemd/user/runlet.service"
     systemctl --user daemon-reload
-    systemctl --user enable --now relay-lite >/dev/null
+    systemctl --user enable --now runlet >/dev/null
     sudo loginctl enable-linger "$USER" 2>/dev/null || true
     sleep 2
-    note "relay-lite.service: $(systemctl --user is-active relay-lite)"
+    note "runlet.service: $(systemctl --user is-active runlet)"
   fi
 fi
 
@@ -278,8 +278,8 @@ cat <<EOF
     There: Add custom connector -> paste the URL -> no authentication -> save.
     Then ask Claude to run a command, e.g. "run uname -a on my machine".
 
-    Runner log:  journalctl --user -u relay-lite -f
-    Status:      $HERE/relay-lite.sh status
+    Runner log:  journalctl --user -u runlet -f
+    Status:      $HERE/runlet.sh status
     Config:      $CONF/env   (token, secret, URL)   $CONF/relay.key
     Re-run this script any time; it keeps existing keys and ids.
 EOF
