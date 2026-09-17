@@ -88,7 +88,26 @@ FG_PID=
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/runlet"
 SEEN="${RUNLET_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/runlet/nonces}"
 
-log() { printf '%s runlet: %s\n' "$(date '+%F %T')" "$*" >&2; }
+# Under systemd, log straight to the journal with the unit named on each
+# entry. Written to stderr, a line from a job's short-lived subshell often
+# lost its unit: journald looks the unit up from the writer's pid, which has
+# exited by then, so `journalctl -u runlet` missed most "exit" lines.
+# systemd-cat has the same race; logger --journald can set USER_UNIT itself.
+# Elsewhere (a terminal, --once, tests) it is plain stderr as before.
+LOG_UNIT=
+if [[ -n "${JOURNAL_STREAM:-}" ]] && command -v logger >/dev/null 2>&1; then
+  LOG_UNIT=$(sed -n 's|^0::.*/\([^/]*\.service\)$|\1|p' /proc/self/cgroup 2>/dev/null)
+fi
+log() {
+  local line; line="$(date '+%F %T') runlet: $*"
+  if [[ -n "$LOG_UNIT" ]]; then
+    # One field per line, so a newline in a logged command must not start a
+    # field of its own.
+    printf 'MESSAGE=%s\nPRIORITY=6\nSYSLOG_IDENTIFIER=runlet.sh\nUSER_UNIT=%s\n' "${line//$'\n'/ }" "$LOG_UNIT" \
+      | logger --journald 2>/dev/null && return
+  fi
+  printf '%s\n' "$line" >&2
+}
 
 for dep in jq openssl timeout; do
   command -v "$dep" >/dev/null 2>&1 || { log "missing dependency: $dep"; exit 1; }
