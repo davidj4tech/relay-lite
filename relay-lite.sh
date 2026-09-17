@@ -21,6 +21,9 @@
 #     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
 #     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
 #
+# RELAY_PARALLEL, RELAY_CMD_TIMEOUT and RELAY_POLL are re-read from the env
+# file every poll: edit the file and the change is live within one interval.
+#
 # This is github.com/davidj4tech/tmux-relay's d1-runner with everything that is not "run a command
 # and write the result" removed: no kinds, no panes, no Claude, no mailbox.
 # The signature it checks is the same v1 scheme, so the two can share a key
@@ -118,8 +121,24 @@ relay-lite: killed after ${CMD_TIMEOUT}s"
   fi
 }
 
+# Settings that may change while the runner is up are re-read every poll, so
+# editing ~/.config/relay-lite/env takes effect within one poll interval and
+# no restart is needed. Only these: the token, key and database stay as
+# loaded, because changing those under a running job is not "on the fly".
+reload_tunables() {
+  local v
+  [[ -r "$CONF_DIR/env" ]] || return 0
+  v=$(sed -n 's/^RELAY_PARALLEL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$PARALLEL" ]]; then log "RELAY_PARALLEL now $v (was $PARALLEL)"; PARALLEL="$v"; fi
+  v=$(sed -n 's/^RELAY_CMD_TIMEOUT=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$CMD_TIMEOUT" ]]; then log "RELAY_CMD_TIMEOUT now ${v}s (was ${CMD_TIMEOUT}s)"; CMD_TIMEOUT="$v"; fi
+  v=$(sed -n 's/^RELAY_POLL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$POLL" ]]; then log "RELAY_POLL now ${v}s (was ${POLL}s)"; POLL="$v"; fi
+}
+
 poll() {
   local rows
+  reload_tunables
   rows=$(d1 "SELECT id, command, sig, nonce FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
   local n; n=$(printf '%s' "$rows" | jq 'length')
   (( n > 0 )) || return 0

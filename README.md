@@ -61,7 +61,8 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   output kept.
 - **One at a time, by default.** The runner finishes each command before it
   starts the next, so a long job holds the queue behind it and nothing
-  interleaves. `RELAY_PARALLEL=4` in `~/.config/relay-lite/env` runs up to
+  interleaves. `RELAY_PARALLEL=4` in `~/.config/relay-lite/env` (re-read
+  every poll, so it takes effect within seconds, no restart) runs up to
   four at once, each in its own process; results then land in whatever
   order they finish. A command can also background its own work (`nohup …
   &`, writing to a log) and return at once; a later command reads the log.
