@@ -234,16 +234,52 @@ else
   fi
 fi
 
+# --- 10. hand the URL to the person -------------------------------------------
+# The last manual step is pasting the URL into Claude's connector form, and
+# there is no way to prefill that form. So: put the URL on the clipboard
+# and open the page. Both are best-effort -- over ssh or in a container
+# there is no clipboard and no browser -- and the URL is printed regardless.
+# If they are not signed in, claude.ai shows the login and returns them to
+# the page afterwards; nothing for us to do about that.
+CONNECT_URL="$WORKER_URL/$URL_SECRET/mcp"
+CONNECTORS_PAGE="https://claude.ai/settings/connectors"
+clip=0; opened=0
+if grep -qi microsoft /proc/version 2>/dev/null && command -v clip.exe >/dev/null 2>&1; then
+  printf '%s' "$CONNECT_URL" | clip.exe 2>/dev/null && clip=1              # WSL -> Windows clipboard
+elif command -v wl-copy >/dev/null 2>&1 && [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  printf '%s' "$CONNECT_URL" | wl-copy 2>/dev/null && clip=1
+elif command -v xclip >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+  printf '%s' "$CONNECT_URL" | xclip -selection clipboard 2>/dev/null && clip=1
+elif command -v pbcopy >/dev/null 2>&1; then
+  printf '%s' "$CONNECT_URL" | pbcopy 2>/dev/null && clip=1
+fi
+if [[ -z "${SSH_CONNECTION:-}" ]]; then
+  if grep -qi microsoft /proc/version 2>/dev/null && command -v cmd.exe >/dev/null 2>&1; then
+    ( cd /mnt/c 2>/dev/null && cmd.exe /c start "" "$CONNECTORS_PAGE" >/dev/null 2>&1 ) && opened=1   # Windows default browser
+  elif command -v xdg-open >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    ( xdg-open "$CONNECTORS_PAGE" >/dev/null 2>&1 & ) && opened=1
+  elif command -v open >/dev/null 2>&1 && [[ "$(uname)" == Darwin ]]; then
+    open "$CONNECTORS_PAGE" >/dev/null 2>&1 && opened=1
+  fi
+fi
+
 say "Done"
 cat <<EOF
     Connector URL (treat it as a password; it is the only credential):
 
-        $WORKER_URL/$URL_SECRET/mcp
+        $CONNECT_URL
 
-    In Claude: Settings -> Connectors -> Add custom connector, paste that URL,
-    no authentication. Then ask it to run a command.
+EOF
+(( clip ))   && note "It is on your clipboard." \
+             || note "Copy it from above."
+(( opened )) && note "Claude's connectors page is opening in your browser (sign in if it asks)." \
+             || note "Open $CONNECTORS_PAGE in a browser (sign in if it asks)."
+cat <<EOF
+    There: Add custom connector -> paste the URL -> no authentication -> save.
+    Then ask Claude to run a command, e.g. "run uname -a on my machine".
 
     Runner log:  journalctl --user -u relay-lite -f
+    Status:      $HERE/relay-lite.sh status
     Config:      $CONF/env   (token, secret, URL)   $CONF/relay.key
     Re-run this script any time; it keeps existing keys and ids.
 EOF

@@ -36,8 +36,10 @@ The short version, for someone who has done this before:
 2. Windows: from PowerShell in this folder, `.\install.ps1` (installs WSL2 +
    Ubuntu if needed, one reboot, then runs the Linux installer inside it).
    Linux or WSL: `./install.sh`.
-3. Paste the printed URL into your assistant as a custom connector, no
-   authentication.
+3. The installer puts the connector URL on your clipboard and opens
+   Claude's connectors page; add a custom connector there, paste, no
+   authentication. (Printed too, for a machine with no clipboard or
+   browser.)
 
 The installer creates the D1 database, applies the schema, registers a
 workers.dev subdomain if the account has none, generates the signing key and

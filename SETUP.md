@@ -70,15 +70,21 @@ cd relay-lite
 ./install.sh
 ```
 
-Either way, the installer ends with **Done** and prints a long web address
-ending in `/mcp`. That address is your key: anyone who has it can run
-commands on this computer. Copy it and keep it private.
+Either way, the installer ends with **Done**, prints a long web address
+ending in `/mcp`, puts it on your clipboard, and opens Claude's connectors
+page in your browser. That address is your key: anyone who has it can run
+commands on this computer. Keep it private.
 
 ## 4. Connect the assistant
 
-In Claude (web or app): **Settings → Connectors → Add custom connector**.
-Paste the address, choose **no authentication**, save. Then in a chat, ask
-it to run a command, for example "run `uname -a` on my machine".
+On the page that opened (sign in to Claude first if it asks; it brings
+you back), click **Add custom connector**, paste the address, choose
+**no authentication**, save. If the page did not open, it is
+**Settings → Connectors** at <https://claude.ai/settings/connectors>, and
+the address is printed in the terminal if the clipboard did not take it.
+
+Then in a chat, ask it to run a command, for example "run `uname -a` on my
+machine".
 
 The assistant learns how the tools work from the tools themselves; nothing
 more is required. If you want it to behave a particular way, put a note in
