@@ -10,5 +10,5 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "__DB_NAME__", "database_id": "__DB_ID__" }
   ],
-  "vars": { "RUNLET_WAIT_DEFAULT": "30", "RUNLET_WAIT_MAX": "120" }
+  "vars": { "RUNLET_WAIT_DEFAULT": "30", "RUNLET_WAIT_MAX": "30" }
 }

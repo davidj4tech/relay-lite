@@ -36,6 +36,10 @@ interface Env {
 }
 
 const PROTOCOL_VERSION = '2025-06-18'
+// Cap on any `wait`. The claude.ai connector drops a call that stays silent
+// for about a minute, and sometimes sooner, so a longer wait fails there even
+// though the Worker answers. Measured 2026-09-17; keep this well under that.
+const WAIT_MAX = 30
 const TERMINAL = ['done', 'error', 'rejected', 'timeout', 'cancelled']
 const FAILED = ['error', 'rejected', 'timeout', 'cancelled']
 const MAX_COMMAND_CHARS = 8000
@@ -92,7 +96,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         command: { type: 'string', description: 'The shell command, run with bash -lc from the home directory.' },
-        wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 120). Use 0 to queue and return the id at once.' },
+        wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 30). Use 0 to queue and return the id at once.' },
         background: {
           type: 'boolean',
           description:
@@ -115,7 +119,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         id: { type: 'number', description: 'Row id from run_command.' },
-        wait: { type: 'number', description: 'Seconds to wait for the runner to confirm (default 15, max 120).' },
+        wait: { type: 'number', description: 'Seconds to wait for the runner to confirm (default 15, max 30).' },
       },
       required: ['id'],
     },
@@ -145,7 +149,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         id: { type: 'number', description: 'Row id from run_command.' },
-        wait: { type: 'number', description: 'Seconds to wait for it to finish (default 0: answer now; max 120).' },
+        wait: { type: 'number', description: 'Seconds to wait for it to finish (default 0: answer now; max 30).' },
       },
       required: ['id'],
     },
@@ -194,7 +198,7 @@ async function awaitRow(env: Env, id: number, waitSeconds: number): Promise<{ ro
 }
 
 function clampWait(env: Env, asked: unknown, fallback: number): number {
-  const max = Number(env.RUNLET_WAIT_MAX ?? 120)
+  const max = Number(env.RUNLET_WAIT_MAX ?? WAIT_MAX)
   const n = Number(asked ?? fallback)
   return Math.min(Math.max(Number.isFinite(n) ? n : fallback, 0), max)
 }

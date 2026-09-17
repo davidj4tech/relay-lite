@@ -223,7 +223,7 @@ rid=$(jq -r '.result.content[0].text' <<<"$resp" | grep -oE '^#[0-9]+' | tr -d '
 # get_result with a wait: if a service is already running it may have taken
 # the row before the one-shot poll above, and still be on it.
 got=$(curl -fsS -X POST "$WORKER_URL/$URL_SECRET/mcp" -H 'Content-Type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_result\",\"arguments\":{\"id\":$rid,\"wait\":60}}}" \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_result\",\"arguments\":{\"id\":$rid,\"wait\":30}}}" \
   | jq -r '.result.content[0].text')
 grep -q 'runlet-ok' <<<"$got" || die "smoke test failed; the runner did not produce the result: $got"
 note "queued #$rid, ran it, read the output back: OK"
