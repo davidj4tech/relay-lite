@@ -78,7 +78,7 @@ if (( ! node_ok )); then
 fi
 NODE_BIN=$(dirname "$(command -v node)")
 note "node $(node -v), npm $(npm -v)"
-( cd "$HERE/worker" && npm install --silent --no-audit --no-fund ) || die "npm install failed in lite/worker"
+( cd "$HERE/worker" && npm install --silent --no-audit --no-fund ) || die "npm install failed in worker/"
 WRANGLER="$HERE/worker/node_modules/.bin/wrangler"
 note "wrangler $("$WRANGLER" --version 2>/dev/null | tail -1)"
 
@@ -156,12 +156,16 @@ else note "relay.key exists, keeping it"; fi
 if [[ -r "$CONF/env" ]] && URL_SECRET=$(sed -n 's/^RUNLET_URL_SECRET=//p' "$CONF/env" | tail -1) && [[ -n "$URL_SECRET" ]]; then
   note "URL secret exists, keeping it"
 else
-  # Seven random words from the EFF short list (1295 words): about 72 bits,
-  # beyond online guessing, and a URL a person can read back over the phone.
+  # Random words from the EFF short list (1295 words), RUNLET_SECRET_WORDS of
+  # them (default 5: about 52 bits, ~1,100 years at 100k guesses/s with no
+  # rate limit anywhere -- the floor for a secret that is a shell on the
+  # machine; 6 is ~1.5M years). A URL a person can read back over the phone.
   # Hex if the list is missing, so a stripped-down copy still installs.
+  nwords="${RUNLET_SECRET_WORDS:-5}"
+  [[ "$nwords" =~ ^[0-9]+$ ]] && (( nwords >= 4 )) || { note "RUNLET_SECRET_WORDS=$nwords is too few; using 5"; nwords=5; }
   if [[ -r "$HERE/words.txt" ]] && (( $(wc -l < "$HERE/words.txt") > 1000 )); then
-    URL_SECRET=$(shuf -n 7 --random-source=/dev/urandom "$HERE/words.txt" | paste -sd- -)
-    note "generated the URL secret (seven words)"
+    URL_SECRET=$(shuf -n "$nwords" --random-source=/dev/urandom "$HERE/words.txt" | paste -sd- -)
+    note "generated the URL secret ($nwords words)"
   else
     URL_SECRET=$(openssl rand -hex 24); note "generated the URL secret (hex; words.txt not found)"
   fi

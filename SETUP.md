@@ -71,7 +71,7 @@ cd runlet
 ```
 
 Either way, the installer ends with **Done**, prints a web address made of
-seven random words and ending in `/mcp`, puts it on your clipboard, and
+five random words and ending in `/mcp`, puts it on your clipboard, and
 opens Claude's connectors page in your browser. That address is your key: anyone who has it can run
 commands on this computer. Keep it private.
 
