@@ -1,0 +1,14 @@
+{
+  "name": "relay-lite-worker",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260730.1",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.115.0"
+  }
+}

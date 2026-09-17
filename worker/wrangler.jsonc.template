@@ -1,0 +1,14 @@
+// relay-lite — wrangler config. install.sh fills in the two ids and writes
+// wrangler.jsonc next to this file; do not edit the template by hand.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__WORKER_NAME__",
+  "main": "src/index.ts",
+  "account_id": "__ACCOUNT_ID__",
+  "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "__DB_NAME__", "database_id": "__DB_ID__" }
+  ],
+  "vars": { "RELAY_WAIT_DEFAULT": "30", "RELAY_WAIT_MAX": "120" }
+}

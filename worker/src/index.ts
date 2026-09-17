@@ -1,0 +1,196 @@
+/**
+ * relay-lite — the smallest relay that works.
+ *
+ * One MCP server, two tools: run_command queues a shell command for a runner
+ * on your machine and waits for its result; get_result fetches a result the
+ * wait missed. Nothing else. No Claude Code on the host, no panes, no mail.
+ *
+ * ###########################################################################
+ * ##  This queues commands that a machine will EXECUTE as a real user.     ##
+ * ##  Whoever can reach this Worker's URL can run arbitrary shell on the   ##
+ * ##  runner host. Two things stand in the way:                            ##
+ * ##                                                                       ##
+ * ##   1. The URL secret. The MCP endpoint is /<RELAY_URL_SECRET>/mcp, and ##
+ * ##      any other path is 404. Treat that URL like a password: it goes   ##
+ * ##      into the connector settings of ONE assistant and nowhere else.   ##
+ * ##   2. HMAC. Every row is signed with RELAY_HMAC_KEY, held only here    ##
+ * ##      and on the runner. Database access alone cannot make the runner ##
+ * ##      execute anything.                                                ##
+ * ###########################################################################
+ *
+ * The signature is byte-for-byte the v1 scheme of tmux-relay's runner
+ * (nonce + "\n" + command, HMAC-SHA256 keyed with the ASCII hex key), so
+ * relay-lite.sh and tmux-relay's d1-runner.sh agree; tests/vectors.json in that
+ * repo pins it.
+ */
+
+interface Env {
+  DB: D1Database
+  /** Hex key shared with the runner (relay.key). Set with `wrangler secret put`. */
+  RELAY_HMAC_KEY: string
+  /** The path secret. Set with `wrangler secret put`. */
+  RELAY_URL_SECRET: string
+  /** Seconds run_command waits by default / at most. */
+  RELAY_WAIT_DEFAULT?: string
+  RELAY_WAIT_MAX?: string
+}
+
+const PROTOCOL_VERSION = '2025-06-18'
+const TERMINAL = ['done', 'error', 'rejected', 'timeout']
+const MAX_COMMAND_CHARS = 8000
+
+// --- signing (mirrors tmux-relay relay-sign.sh relay_hmac) -----------------
+async function hmacHex(keyText: string, message: string): Promise<string> {
+  const enc = new TextEncoder()
+  // The key is the ASCII characters of the hex string, not the decoded bytes:
+  // bash passes `-macopt key:$KEY`, which takes the literal text.
+  const key = await crypto.subtle.importKey('raw', enc.encode(keyText), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message))
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+function randomHex(bytes: number): string {
+  const a = new Uint8Array(bytes)
+  crypto.getRandomValues(a)
+  return [...a].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let d = 0
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return d === 0
+}
+
+// --- MCP -------------------------------------------------------------------
+const TOOLS = [
+  {
+    name: 'run_command',
+    description:
+      'Run a shell command on the relay host and return its output. The command is ' +
+      'queued for a runner on that machine, which executes it as its user with a ' +
+      'timeout, and this call waits up to `wait` seconds for the result. If it ' +
+      'times out you get the row id; call get_result with it later. Anything you ' +
+      'send here RUNS: prefer read-only commands unless the user asked for a change.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The shell command, run with bash -lc.' },
+        wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 120).' },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'get_result',
+    description: 'Fetch the status and output of a command queued earlier, by the id run_command returned.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'number', description: 'Row id from run_command.' } },
+      required: ['id'],
+    },
+  },
+]
+
+interface Row {
+  id: number
+  status: string
+  exit_code: number | null
+  output: string | null
+}
+
+function render(row: Row, timedOut: boolean): string {
+  const head = `#${row.id} ${row.status}${row.exit_code === null ? '' : ` exit=${row.exit_code}`}`
+  if (timedOut) return `${head}\nStill running after the wait. Call get_result(id=${row.id}) for the output.`
+  return `${head}\n${row.output ?? ''}`
+}
+
+function rpc(id: unknown, result: unknown): Response {
+  return Response.json({ jsonrpc: '2.0', id, result })
+}
+function rpcError(id: unknown, code: number, message: string): Response {
+  return Response.json({ jsonrpc: '2.0', id, error: { code, message } })
+}
+function toolText(id: unknown, text: string, isError = false): Response {
+  return rpc(id, { content: [{ type: 'text', text }], isError })
+}
+
+async function enqueue(env: Env, command: string, waitSeconds: number): Promise<Response | { row: Row; timedOut: boolean }> {
+  const nonce = randomHex(16)
+  const sig = await hmacHex(env.RELAY_HMAC_KEY, `${nonce}\n${command}`)
+  const ins = await env.DB.prepare(
+    `INSERT INTO commands (command, status, sig, nonce, created_at, updated_at)
+     VALUES (?, 'pending', ?, ?, datetime('now'), datetime('now'))`,
+  )
+    .bind(command, sig, nonce)
+    .run()
+  const id = Number(ins.meta.last_row_id)
+  const deadline = Date.now() + waitSeconds * 1000
+  let delay = 250
+  for (;;) {
+    const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(id).first<Row>()
+    if (row && TERMINAL.includes(row.status)) return { row, timedOut: false }
+    if (Date.now() >= deadline) return { row: row ?? { id, status: 'pending', exit_code: null, output: null }, timedOut: true }
+    await new Promise((r) => setTimeout(r, Math.min(delay, Math.max(0, deadline - Date.now()))))
+    delay = Math.min(Math.round(delay * 1.5), 2000)
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url)
+    // The path IS the credential. Constant-time compare, and every miss is a
+    // plain 404 so the endpoint cannot be found by probing.
+    const parts = url.pathname.split('/').filter(Boolean)
+    if (parts.length !== 2 || parts[1] !== 'mcp' || !env.RELAY_URL_SECRET || !timingSafeEqual(parts[0], env.RELAY_URL_SECRET)) {
+      return new Response('not found', { status: 404 })
+    }
+    if (request.method !== 'POST') return new Response('POST JSON-RPC here', { status: 405 })
+
+    let body: any
+    try {
+      body = await request.json()
+    } catch {
+      return rpcError(null, -32700, 'parse error')
+    }
+    const { method, id, params } = body ?? {}
+    if (id === undefined || id === null) return new Response(null, { status: 202 }) // a notification
+
+    switch (method) {
+      case 'initialize':
+        return rpc(id, {
+          protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: { name: 'relay-lite', version: '0.1.0' },
+        })
+      case 'ping':
+        return rpc(id, {})
+      case 'tools/list':
+        return rpc(id, { tools: TOOLS })
+      case 'tools/call': {
+        const name = params?.name
+        const args = params?.arguments ?? {}
+        if (name === 'run_command') {
+          const command = String(args.command ?? '')
+          if (!command.trim()) return toolText(id, 'run_command needs a command.', true)
+          if (command.length > MAX_COMMAND_CHARS) return toolText(id, `Command is ${command.length} characters; the limit is ${MAX_COMMAND_CHARS}.`, true)
+          const def = Number(env.RELAY_WAIT_DEFAULT ?? 30)
+          const max = Number(env.RELAY_WAIT_MAX ?? 120)
+          const asked = Number(args.wait ?? def)
+          const wait = Math.min(Math.max(Number.isFinite(asked) ? asked : def, 0), max)
+          const r = await enqueue(env, command, wait)
+          if (r instanceof Response) return r
+          return toolText(id, render(r.row, r.timedOut), !r.timedOut && ['error', 'rejected', 'timeout'].includes(r.row.status))
+        }
+        if (name === 'get_result') {
+          const rid = Number(args.id)
+          if (!Number.isInteger(rid)) return toolText(id, 'get_result needs a numeric id.', true)
+          const row = await env.DB.prepare(`SELECT id, status, exit_code, output FROM commands WHERE id = ?`).bind(rid).first<Row>()
+          if (!row) return toolText(id, `No command #${rid}.`, true)
+          return toolText(id, render(row, !TERMINAL.includes(row.status)), ['error', 'rejected', 'timeout'].includes(row.status))
+        }
+        return rpcError(id, -32601, `unknown tool ${JSON.stringify(name)}`)
+      }
+      default:
+        return rpcError(id, -32601, `unknown method ${JSON.stringify(method)}`)
+    }
+  },
+}

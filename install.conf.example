@@ -1,0 +1,16 @@
+# install.conf — copy to install.conf beside install.sh and fill in, so the
+# installer asks nothing. KEEP THIS FILE PRIVATE: the token can create and
+# change Workers and databases in the account. install.sh copies what it
+# needs into ~/.config/relay-lite/env; delete this file once it has run.
+
+# The one manual step. Create at https://dash.cloudflare.com/profile/api-tokens
+# -> Create Token -> Custom Token, Account scope:
+#   Workers Scripts: Edit    D1: Edit    Account Settings: Read
+CLOUDFLARE_API_TOKEN=
+
+# Only needed if the token can see more than one account.
+#CLOUDFLARE_ACCOUNT_ID=
+
+# A short name for this machine. Goes into the Worker and database names
+# (relay-lite-<site>) so several machines can share one account.
+RELAY_SITE=
