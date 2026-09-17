@@ -24,10 +24,22 @@ while IFS=$'\x1f' read -r name nonce cmd_b64 expected; do
 done < <(jq -r '.vectors[] | [.name, .nonce, .command_b64, .expected] | join("")' "$V")
 
 # --- the Worker side, the real hmacHex from worker/src/index.ts -------------
-# Node 22.6+ strips the types itself; nothing to build. Run from the tests
-# directory so the relative import resolves (a stdin script resolves
-# against the working directory).
-cd "$HERE" && node --experimental-strip-types --no-warnings - "$V" <<'JS' || fail=1
+# Node 22.6+ strips the types itself; nothing to build. Prefer whatever `node`
+# the caller already has on PATH. On fnm-managed hosts (for example red5),
+# non-interactive shells may not have the default Node alias on PATH, so use
+# the same direct alias path as the fleet dotfiles rather than evaluating
+# `fnm env` or falling back to a distro Node that may be the wrong version.
+if ! command -v node >/dev/null 2>&1; then
+  fnm_node="${FNM_DIR:-$HOME/.local/share/fnm}/aliases/default/bin"
+  [[ -x "$fnm_node/node" ]] && export PATH="$fnm_node:$PATH"
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "check-signing: Node 22.6+ is required for the Worker signing check" >&2
+  fail=1
+else
+  # Run from the tests directory so the relative import resolves (a stdin
+  # script resolves against the working directory).
+  cd "$HERE" && node --experimental-strip-types --no-warnings - "$V" <<'JS' || fail=1
 import { hmacHex } from '../worker/src/index.ts'
 import { readFileSync } from 'node:fs'
 const v = JSON.parse(readFileSync(process.argv[2], 'utf8'))
@@ -41,6 +53,7 @@ for (const t of v.vectors) {
 }
 process.exit(bad ? 1 : 0)
 JS
+fi
 
 if (( fail )); then echo "check-signing: MISMATCH — do not deploy"; exit 1; fi
 echo "check-signing: $n vectors, runner and Worker agree"

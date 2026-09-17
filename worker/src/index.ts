@@ -1,9 +1,10 @@
 /**
  * runlet — the smallest relay that works.
  *
- * One MCP server, two tools: run_command queues a shell command for a runner
- * on your machine and waits for its result; get_result fetches a result the
- * wait missed. Nothing else. No Claude Code on the host, no panes, no mail.
+ * One MCP server, four tools: run_command queues a shell command for a runner
+ * on your machine; get_result fetches it later; detach lets a slow foreground
+ * command keep running without holding the queue; cancel stops pending or running
+ * work. No Claude Code on the host, no panes, no mail.
  *
  * ###########################################################################
  * ##  This queues commands that a machine will EXECUTE as a real user.     ##

@@ -1,136 +1,232 @@
 # runlet
 
-Let an AI assistant run shell commands on your computer and read the results,
-through a tiny Cloudflare Worker, with one command to set it up.
+Run shell commands on your own computer from an AI assistant, without opening an inbound port, exposing SSH, or keeping an agent runtime on the machine.
 
+Runlet is deliberately small. A remote MCP client queues a signed command through a Cloudflare Worker; a local runner polls for it, verifies it, runs it, and writes the result back.
+
+```text
+assistant  ──MCP──▶  Cloudflare Worker  ──▶  signed row in D1
+                                                   ▲
+your machine ◀──────── runlet.sh polls, verifies, runs, returns output
 ```
-assistant  ──MCP──▶  Worker (Cloudflare)  ──▶  signed row in D1
-                                                    ▲
-your machine ◀──── runlet.sh polls, verifies, runs, writes the result
-```
 
-Two tools: `run_command` (queue a command and wait for its output) and
-`get_result` (fetch it later). Works with any MCP client that can add a
-remote server by URL: Claude (web, desktop, app, Claude Code), ChatGPT
-custom connectors, and others. The machine needs no open port, no public
-address and no VPN: the runner only makes outbound HTTPS calls.
+The local machine only makes outbound HTTPS requests. It needs no public IP, open port, VPN, or inbound firewall rule.
 
-> **This executes shell commands from the internet, as you.** Whoever has
-> the connector URL can run anything on the machine. There is no allowlist.
-> Two things stand in the way: the URL is a secret, and every queued row is
-> signed with a key held only by the Worker and the runner, so getting a
-> row into the database is not the same as getting it executed. Treat the
-> URL like a password.
+> [!WARNING]
+> Runlet executes shell commands **as your user**. Anyone who has the secret connector URL can ask the Worker to queue commands for that machine. Treat the URL like a password, and only give it to assistants or clients you trust.
 
-## Setting it up
+## What Runlet is
 
-**[SETUP.md](SETUP.md)** is the whole thing in plain language: creating the
-free Cloudflare account, the API token with its three permissions, running
-the installer on Windows or Linux, and connecting the assistant. Hand that
-file to whoever is doing it.
+Runlet is a small remote-execution primitive, not an agent framework. It does one job: give an MCP-capable assistant a shell on a machine you control.
 
-The short version, for someone who has done this before:
+That makes it useful on its own, or as a low-level building block underneath larger agent, automation, CI, homelab, and administration workflows.
 
-1. A Cloudflare API token (Custom, Account scope): **Workers Scripts: Edit**,
-   **D1: Edit**, **Account Settings: Read**.
-2. Windows: from PowerShell in this folder, `.\install.ps1` (installs WSL2 +
-   Ubuntu if needed, one reboot, then runs the Linux installer inside it).
-   Linux or WSL: `./install.sh`.
-3. The installer puts the connector URL on your clipboard and opens
-   Claude's connectors page; add a custom connector there, paste, no
-   authentication. (Printed too, for a machine with no clipboard or
-   browser.)
+It works with MCP clients that can connect to a remote server by URL, including Claude clients, ChatGPT custom connectors where available, and other MCP hosts.
 
-The installer creates the D1 database, applies the schema, registers a
-workers.dev subdomain if the account has none, generates the signing key and
-the URL secret, sets both as Worker secrets, deploys the Worker, runs an
-end-to-end smoke test, writes `~/.config/runlet/{env,relay.key}` and
-starts the runner as a systemd user service. Re-running is safe: it keeps
-existing ids and keys. Several machines can share one account: each gets a
-Worker and database named `runlet-<site>` (default: the hostname). Copy
-`install.conf.example` to `install.conf` to answer the prompts in advance.
+## Tools
 
-## What keeps this safe enough
+Runlet exposes four MCP tools:
 
-- **The URL is the credential.** The endpoint is `/<secret>/mcp`; every
-  other path is a 404, compared in constant time. The secret is five random
-  words from the EFF short wordlist (`words.txt`), about 52 bits: with no
-  rate limit anywhere, a brute force at 100,000 guesses a second takes
-  about 1,100 years, and Cloudflare's free-plan request cap makes it far
-  longer. It reads as `/jog-lapel-flame-lift-charm/mcp` rather than 48 hex
-  characters. `RUNLET_SECRET_WORDS=6` for more (about 1.5 million years);
-  fewer than 4 is refused. Give it to one assistant.
-  Rotate it by deleting the `RUNLET_URL_SECRET` line from
-  `~/.config/runlet/env` and re-running the installer.
-- **Rows are signed.** HMAC-SHA256 over the nonce and the command, keyed
-  with a secret the Worker and the runner share and nothing else holds. The
-  runner refuses a row that does not verify, and a nonce it has seen before.
-- **Commands run as you**, with `bash -lc`, a 600 s timeout and 60 KB of
-  output kept.
-- **One at a time, by default.** The runner finishes each command before it
-  starts the next, so a long job holds the queue behind it and nothing
-  interleaves. `RUNLET_PARALLEL=4` in `~/.config/runlet/env` (re-read
-  every poll, so it takes effect within seconds, no restart) runs up to
-  four at once, each in its own process; results then land in whatever
-  order they finish.
-- **Or the assistant chooses, per command.** `run_command` with
-  `background: true` starts that one alongside the queue, so a build or a
-  download does not hold up the quick command after it; the assistant
-  fetches its output later with `get_result` and a `wait`. The owner caps
-  how many such jobs run at once (`RUNLET_BACKGROUND_MAX`, default 4).
-  `detach` does the same to a command that is already running, so a job
-  that turns out slow stops holding the queue without being killed. Every
-  command runs in its own process for this reason; the runner looks for a
-  detach every few seconds while it waits on one (`RUNLET_DETACH_CHECK`).
-- **`cancel` stops a command.** One still queued never starts; one running
-  is killed with everything it spawned (it runs as its own process group)
-  and its status becomes `cancelled`, with whatever output there was. It
-  stops; it does not undo.
-- **A running job shows its output so far.** Every `RUNLET_PROGRESS_EVERY`
-  seconds (default 10) the runner copies what the job has printed onto the
-  row, so `get_result` on a running command returns the partial output.
-- **A load ceiling, off by default.** `RUNLET_LOAD_MAX=4` holds new commands
-  while the 1-minute load average is above 4; running ones are left alone
-  and pending rows wait. Logged when it engages and when it releases.
-- **Each runner signs its name** (hostname, or `RUNLET_RUNNER_ID`) on the
-  rows it claims, and the restart sweep only touches its own, so two
-  machines sharing one database cannot mark each other's jobs as failed.
-- **Finished rows are pruned** after `RUNLET_KEEP_DAYS` (default 30), once
-  a day, so the table does not grow forever. Pending and running rows are
-  never touched.
-- **A runner restart mid-job** marks the rows it was running as `error`
-  on startup, with a note saying the command may or may not have completed,
-  rather than leaving them `running` forever. A row still `running` well
-  past the timeout with no result, which means the runner hung rather than
-  restarted, is marked the same way every few minutes.
-- **`runlet.sh status`** prints the last ten rows, newest first, with
-  status, time, command and the start of the output: "is it stuck?" as one
-  command. `status 30` for more.
-- **`tests/check-signing.sh`** holds the runner's openssl signing and the
-  Worker's WebCrypto signing to one set of vectors, the same fixture
-  tmux-relay's runner is pinned to. A drift there would reject every
-  command with no useful error, so run it after touching either side.
-
-What it deliberately lacks: a login flow (OAuth), per-client permissions,
-and any record of *which* assistant queued a row. If you need those, the
-full relay this was distilled from is
-[tmux-relay](https://github.com/davidj4tech/tmux-relay), whose runner uses
-the same signature scheme.
-
-## Files
-
-| | |
+| Tool | Purpose |
 |---|---|
-| `worker/src/index.ts` | the Worker: MCP over HTTP, two tools, signing, queue-and-wait |
-| `schema.sql` | one table |
-| `runlet.sh` | the runner: poll, verify, run, write back |
-| `runlet.service` | systemd user unit template |
-| `install.sh`, `install.ps1` | the one-command setup, Linux/WSL and Windows |
-| `SETUP.md` | the walkthrough for a person |
+| `run_command` | Queue a shell command and optionally wait for its result. |
+| `get_result` | Fetch a queued command later, optionally waiting for completion. |
+| `detach` | Let an already-running command continue without holding the foreground queue. |
+| `cancel` | Stop a pending command, or kill a running command and its process group. |
 
-Runner log: `journalctl --user -u runlet -f`. Config:
-`~/.config/runlet/env` and `relay.key`.
+A short command can usually be handled in one call:
+
+```text
+run_command("uname -a")
+```
+
+For a long command, start it in the background and collect it later:
+
+```text
+run_command("make test", background=true, wait=2)
+get_result(id=42, wait=30)
+```
+
+If a foreground command turns out to be slow, `detach` lets it keep running while later commands move through the queue. `cancel` stops a queued command before it starts, or asks the runner to terminate a running process group.
+
+Each command starts in a fresh `bash -lc` shell. Shell state, including the working directory, does not persist between calls, so use `cd` in the command when needed.
+
+## How it works
+
+1. The MCP client calls the Worker through a secret URL.
+2. The Worker creates a nonce, signs `nonce + "\n" + command` with HMAC-SHA256, and writes the command to D1.
+3. `runlet.sh` polls D1 over Cloudflare's HTTP API.
+4. The runner verifies the signature and rejects reused nonces.
+5. The runner atomically claims the row, then executes the command locally.
+6. Output, exit status, runner identity, and final state are written back to D1.
+7. The Worker returns the result to the MCP client, or the client retrieves it later with `get_result`.
+
+There is no persistent shell session between calls, and no requirement for Claude Code, tmux, SSH, or a local AI runtime.
+
+## Install
+
+For the complete walkthrough, see **[SETUP.md](SETUP.md)**.
+
+The short version for an existing Cloudflare user:
+
+1. Create a Custom API token with these **Account** permissions:
+   - **Workers Scripts: Edit**
+   - **D1: Edit**
+   - **Account Settings: Read**
+2. Run the installer:
+
+   ```bash
+   ./install.sh
+   ```
+
+   On Windows, run `.\install.ps1` from PowerShell. It uses WSL2 and runs the Linux installer inside Ubuntu.
+3. Add the printed `https://.../<secret>/mcp` URL to your MCP client as a remote/custom connector with no additional authentication.
+
+The installer creates the D1 database, applies the schema, creates the Worker, generates the signing key and URL secret, stores the required Worker secrets, deploys the Worker, runs an end-to-end smoke test, writes the local config, and starts the runner as a systemd user service.
+
+Re-running the installer is safe. Existing IDs and secrets are reused unless you deliberately rotate them.
+
+Several machines can share one Cloudflare account. Each gets its own Worker and D1 database named `runlet-<site>`; the site name defaults to the hostname. Copy `install.conf.example` to `install.conf` if you want to pre-answer the installer prompts.
+
+## Security model
+
+Runlet is intentionally capability-based and minimal. It does not try to be a multi-user authorization system.
+
+### Secret connector URL
+
+The endpoint is `/<secret>/mcp`; other paths return 404. The secret is five random words from the bundled EFF short wordlist by default, roughly 52 bits of entropy. The comparison is constant-time.
+
+Use `RUNLET_SECRET_WORDS=6` during installation if you want a longer secret. Fewer than four words are refused.
+
+To rotate a leaked connector URL, remove `RUNLET_URL_SECRET` from `~/.config/runlet/env` and run the installer again.
+
+### Signed rows
+
+Every queued command is signed with HMAC-SHA256 using a key known only to the Worker and runner. Writing directly to the D1 table is therefore not enough to make the runner execute an arbitrary row.
+
+The runner also records seen nonces and refuses replays.
+
+### Local execution boundary
+
+Commands run as the account that owns the runner service. Runlet has no command allowlist or sandbox of its own. Normal operating-system permissions remain the boundary.
+
+The defaults are:
+
+- command timeout: 600 seconds
+- stored output: 60 KB
+- foreground concurrency: 1
+- background concurrency cap: 4
+- progress copy interval: 10 seconds
+- finished-row retention: 30 days
+
+A cancellation stops future execution, but it cannot undo side effects a command already caused.
+
+## Queueing and concurrency
+
+By default Runlet is serial: one foreground command finishes before the next begins. This keeps command order predictable.
+
+Set `RUNLET_PARALLEL=4` in `~/.config/runlet/env` to allow up to four foreground commands at once. The runner reloads several operational settings while it is running, so many tuning changes do not need a service restart.
+
+A single command can bypass the foreground lane with `run_command(..., background=true)`. Background jobs have their own cap, `RUNLET_BACKGROUND_MAX`, which defaults to 4.
+
+`detach` promotes an already-running foreground command out of the lane without killing it. The runner checks for detach and cancel requests every `RUNLET_DETACH_CHECK` seconds, default 3.
+
+## Failure handling
+
+Runlet tries to make ambiguous states visible rather than pretending they did not happen.
+
+- A runner restart marks that runner's in-flight rows as `error`, with a note that the command may or may not have completed.
+- A row that remains `running` well beyond the command timeout is marked `error` by the stale-job sweep.
+- A command that exceeds `RUNLET_CMD_TIMEOUT` becomes `timeout`.
+- A bad signature or reused nonce becomes `rejected`.
+- A cancelled command becomes `cancelled`.
+- Partial output from a running command is copied to D1 periodically, so `get_result` can show progress before completion.
+- Finished rows are pruned daily after `RUNLET_KEEP_DAYS`; pending and running rows are never pruned.
+
+Each claimed row records the runner name, normally the hostname. This keeps restart and stale-job cleanup scoped correctly when more than one runner uses a database.
+
+## Configuration
+
+The normal local config lives in:
+
+```text
+~/.config/runlet/env
+~/.config/runlet/relay.key
+```
+
+Useful runtime settings include:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `RUNLET_POLL` | `5` | Seconds between queue polls. |
+| `RUNLET_CMD_TIMEOUT` | `600` | Maximum command runtime in seconds. |
+| `RUNLET_MAX_OUTPUT` | `60000` | Maximum output bytes retained per command. |
+| `RUNLET_PARALLEL` | `1` | Foreground commands allowed to run at once. |
+| `RUNLET_BACKGROUND_MAX` | `4` | Maximum background jobs. |
+| `RUNLET_DETACH_CHECK` | `3` | Seconds between detach/cancel checks. |
+| `RUNLET_PROGRESS_EVERY` | `10` | Seconds between partial-output updates; `0` disables them. |
+| `RUNLET_KEEP_DAYS` | `30` | Days to retain finished rows. |
+| `RUNLET_LOAD_MAX` | `0` | Hold new work above this 1-minute load average; `0` disables the ceiling. |
+| `RUNLET_RUNNER_ID` | hostname | Name written on rows claimed by this runner. |
+
+The Worker also supports `RUNLET_WAIT_DEFAULT` and `RUNLET_WAIT_MAX`; waits are capped at 30 seconds by the current Worker implementation so MCP clients are not left silent for too long.
+
+## Operations
+
+Check recent commands:
+
+```bash
+runlet.sh status
+runlet.sh status 30
+```
+
+Follow the runner log:
+
+```bash
+journalctl --user -u runlet -f
+```
+
+Inspect the service:
+
+```bash
+systemctl --user status runlet
+```
+
+Stop or start it:
+
+```bash
+systemctl --user stop runlet
+systemctl --user start runlet
+```
+
+The signing compatibility test keeps the runner's OpenSSL implementation and the Worker's WebCrypto implementation pinned to the same vectors:
+
+```bash
+./tests/check-signing.sh
+```
+
+Run it after changing signing code on either side.
+
+## Deliberate non-features
+
+Runlet does **not** provide OAuth, per-client permissions, command allowlists, audit identity for which assistant queued a row, persistent shell sessions, or an agent runtime on the target machine.
+
+Those omissions are part of the design. If you need richer client identity, session routing, or multi-user policy, see [tmux-relay](https://github.com/davidj4tech/tmux-relay), the larger system from which Runlet was distilled. The two projects use the same command-signing scheme.
+
+## Repository map
+
+| File | Purpose |
+|---|---|
+| `worker/src/index.ts` | Remote MCP Worker: four tools, signing, queueing, and result retrieval. |
+| `schema.sql` | D1 schema: one command table and its pending-row index. |
+| `runlet.sh` | Local runner: poll, verify, claim, execute, monitor, and report. |
+| `runlet.service` | systemd user-service template. |
+| `install.sh` | Linux/WSL installer and Cloudflare provisioning. |
+| `install.ps1` | Windows bootstrap through WSL2. |
+| `install.conf.example` | Optional non-interactive installer configuration. |
+| `SETUP.md` | Start-to-finish setup guide. |
+| `tests/check-signing.sh` | Cross-implementation signing compatibility test. |
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

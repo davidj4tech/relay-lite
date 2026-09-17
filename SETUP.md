@@ -1,111 +1,269 @@
-# runlet — setup, start to finish
+# runlet: setup from start to finish
 
-This lets an AI assistant run commands on this computer and read the
-results. It takes about fifteen minutes. You need a free Cloudflare account,
-and a Windows PC (or any Linux machine).
+Runlet lets an AI assistant run shell commands on this computer and read the results through a remote MCP connection.
 
-## 1. Cloudflare account (free)
+You need:
 
-1. Go to <https://dash.cloudflare.com/sign-up> and create an account with
-   your email. The free plan is all this needs; you will not be asked for
-   a card.
-2. Confirm the email Cloudflare sends you.
-3. Sign in once at <https://dash.cloudflare.com>. You do not need to add a
-   website or a domain. If it asks you to, skip it.
-4. In the left menu open **Compute (Workers)** once. On a brand-new
-   account this activates Workers; nothing else to do there.
+- a free Cloudflare account
+- this repository
+- Linux, or Windows 10/11 with WSL2
+- an MCP client that can add a remote/custom server by URL
 
-## 2. The API token (the one manual step)
+The target machine does **not** need a public IP, open port, VPN, SSH exposure, or a local AI runtime. The runner makes outbound HTTPS requests to Cloudflare.
 
-The installer needs a token that lets it create things in your account.
+> [!WARNING]
+> Commands run as your user. The Runlet connector URL is a credential: anyone who has it can ask Runlet to execute commands on this machine. Keep it private.
 
-1. Go to <https://dash.cloudflare.com/profile/api-tokens>.
-2. Click **Create Token**, then at the bottom **Get started** next to
-   **Create Custom Token**.
+## 1. Prepare Cloudflare
+
+1. Create an account at <https://dash.cloudflare.com/sign-up>.
+2. Confirm your email and sign in.
+3. You do not need to add a website or domain.
+4. On a brand-new account, open **Compute (Workers)** once so Workers is initialised.
+
+The free plan is sufficient for a small personal install.
+
+## 2. Create the API token
+
+The installer uses a Cloudflare API token to create the Worker and D1 database. This token is for provisioning; it is not the credential your MCP client uses later.
+
+1. Open <https://dash.cloudflare.com/profile/api-tokens>.
+2. Click **Create Token** and choose **Create Custom Token**.
 3. Name it `runlet`.
-4. Under **Permissions**, add three rows. Each row has three boxes:
-   scope, item, level.
+4. Add these permissions:
 
-   | scope   | item             | level |
-   |---------|------------------|-------|
-   | Account | Workers Scripts  | Edit  |
-   | Account | D1               | Edit  |
-   | Account | Account Settings | Read  |
+   | Scope | Permission | Level |
+   |---|---|---|
+   | Account | Workers Scripts | Edit |
+   | Account | D1 | Edit |
+   | Account | Account Settings | Read |
 
-5. Under **Account Resources** leave *Include, All accounts* (or pick
-   your account).
-6. Leave everything else as it is. Click **Continue to summary**, then
-   **Create Token**.
-7. Copy the token that appears. **It is shown once.** Paste it somewhere
-   safe for the next step (a text file you delete afterwards is fine).
+5. Include the account where Runlet should live.
+6. Create the token and copy it somewhere temporary and private. Cloudflare shows it once.
+
+If the token can access several accounts, the installer may also ask for the account ID.
 
 ## 3. Run the installer
 
+### Linux
+
+```bash
+cd runlet
+./install.sh
+```
+
+Paste the Cloudflare API token when prompted.
+
 ### Windows
 
-1. Download or unzip this repository somewhere, for example `C:\runlet`.
-2. Open **PowerShell** (Start menu, type PowerShell).
+Runlet uses WSL2 on Windows so the same runner and systemd service work on both platforms.
+
+1. Put the repository somewhere convenient, for example `C:\runlet`.
+2. Open PowerShell.
 3. Run:
 
-   ```
+   ```powershell
    cd C:\runlet
    Set-ExecutionPolicy -Scope Process Bypass
    .\install.ps1
    ```
 
-4. The first time, Windows installs its Linux layer (WSL) and asks to
-   **reboot**. After the reboot, an Ubuntu window opens and asks you to
-   choose a Linux username and password: pick anything and remember the
-   password. Then run the same three lines again.
-5. The installer now runs inside Ubuntu. When it asks, paste the token
-   from step 2 and press Enter. (If it asks for a password, that is the
-   Linux password from step 4; it needs it to install a few packages.)
-6. If it says systemd is off and to run `wsl --shutdown`: in PowerShell run
-   `wsl --shutdown`, then run the three lines from step 3 once more.
+4. If WSL2 is not installed, the script installs WSL2 and Ubuntu first. Reboot if asked, let Ubuntu finish its first-run setup, choose a Linux username and password, then run the commands above again.
+5. Paste the Cloudflare API token when the Linux installer asks for it.
+6. If the installer reports that systemd is disabled, run:
 
-### Linux
+   ```powershell
+   wsl --shutdown
+   ```
 
+   Then run `.\install.ps1` again.
+
+## 4. What the installer creates
+
+The installer:
+
+1. checks required local dependencies
+2. creates or finds a D1 database named `runlet-<site>`
+3. applies `schema.sql`
+4. creates or finds a Worker named `runlet-<site>`
+5. ensures a `workers.dev` subdomain exists
+6. generates the shared HMAC signing key
+7. generates the secret URL path
+8. stores the Worker secrets
+9. deploys the Worker
+10. runs an end-to-end smoke test
+11. writes local config under `~/.config/runlet/`
+12. installs and starts Runlet as a systemd user service
+
+`<site>` defaults to the hostname. Several machines can therefore share one Cloudflare account without sharing a Worker or database.
+
+Re-running the installer is safe. Existing stack IDs and secrets are reused unless you deliberately remove or rotate them.
+
+### Non-interactive setup
+
+```bash
+cp install.conf.example install.conf
 ```
-cd runlet
-./install.sh
+
+Fill in the values before installation. Keep this file private because it may contain the Cloudflare API token, and delete it when you no longer need it.
+
+## 5. Save the connector URL
+
+At the end, the installer prints an address similar to:
+
+```text
+https://runlet-example.example.workers.dev/jog-lapel-flame-lift-charm/mcp
 ```
 
-Either way, the installer ends with **Done**, prints a web address made of
-five random words and ending in `/mcp`, puts it on your clipboard, and
-opens Claude's connectors page in your browser. That address is your key: anyone who has it can run
-commands on this computer. Keep it private.
+The exact hostname will differ. The random word path is the important secret. The installer also attempts to copy the URL to your clipboard and open a connector page.
 
-## 4. Connect the assistant
+**Do not post this URL, commit it to Git, paste it into issue trackers, or share it with an assistant you do not trust.** It is effectively a capability token for shell access through Runlet.
 
-On the page that opened (sign in to Claude first if it asks; it brings
-you back), click **Add custom connector**, paste the address, choose
-**no authentication**, save. If the page did not open, it is
-**Settings → Connectors** at <https://claude.ai/settings/connectors>, and
-the address is printed in the terminal if the clipboard did not take it.
+## 6. Connect your MCP client
 
-Then in a chat, ask it to run a command, for example "run `uname -a` on my
-machine".
+Add the printed URL as a remote/custom MCP server or connector. Runlet authenticates through the secret URL, so choose **no additional authentication** if your client asks.
 
-The assistant learns how the tools work from the tools themselves; nothing
-more is required. If you want it to behave a particular way, put a note in
-the chat's project instructions or custom instructions. A sensible one:
+The exact menu name differs between clients. Claude calls this a custom connector. ChatGPT can use a custom connector/plugin surface where available. Other MCP hosts generally ask for the remote server URL.
 
-> You can run shell commands on my computer with the runlet connector.
-> Commands run as me, one at a time, in a fresh shell each time. Prefer
-> read-only commands; ask before anything that changes or deletes files.
-> For long jobs, pass a short wait and fetch the result later, or
-> background the job and read its log. Keep output small (head, tail, grep).
+Start with a harmless command such as:
 
-## Afterwards
+```text
+uname -a
+```
 
-- The runner keeps working after reboots; nothing to start by hand.
-- To stop it: `systemctl --user stop runlet` inside Ubuntu.
-  To remove it entirely, also delete the Worker and the database in the
-  Cloudflare dashboard.
-- Lost the address? It is in `~/.config/runlet/env` inside Ubuntu, on
-  the `RUNLET_WORKER_URL` and `RUNLET_URL_SECRET` lines: the address is
-  `<RUNLET_WORKER_URL>/<RUNLET_URL_SECRET>/mcp`.
-- Want a new address (say it leaked)? Delete the `RUNLET_URL_SECRET` line
-  from that file and run the installer again.
-- Something went wrong? Run the installer again; it is safe to repeat and
-  picks up where it left off. The log is `journalctl --user -u runlet`.
+or:
+
+```text
+printf 'hello from runlet\n'
+```
+
+The assistant receives Runlet's tool descriptions automatically, including how to wait, run work in the background, detach it, cancel it, and retrieve results later.
+
+## 7. Give the assistant sensible operating rules
+
+Runlet intentionally does not impose a command allowlist. If your MCP client supports project or custom instructions, tell the assistant how you want it to use the machine.
+
+For example:
+
+> You can run shell commands on my computer through Runlet. Commands run as me in a fresh `bash -lc` shell. Prefer read-only inspection unless I have asked for a change. Be cautious with deletion, package changes, service changes, credentials, and network exposure. For long jobs, use background execution or detach them and collect the result later. Keep large output bounded with tools such as `head`, `tail`, `grep`, and `sed`.
+
+Adapt that to your own trust model. Runlet provides transport and verification; the operating policy belongs to you and the assistant using it.
+
+## Everyday operation
+
+The runner starts automatically as a systemd user service.
+
+```bash
+systemctl --user status runlet
+journalctl --user -u runlet -f
+runlet.sh status
+runlet.sh status 30
+```
+
+Stop and start it with:
+
+```bash
+systemctl --user stop runlet
+systemctl --user start runlet
+```
+
+## Rotate the connector URL
+
+If the URL is exposed:
+
+1. Open `~/.config/runlet/env`.
+2. Remove the `RUNLET_URL_SECRET=...` line.
+3. Run the installer again.
+4. Replace the old connector URL in every MCP client.
+
+The old path stops being valid after the Worker is redeployed with the new secret.
+
+## Find a lost connector URL
+
+The components are stored in `~/.config/runlet/env`:
+
+```text
+RUNLET_WORKER_URL=...
+RUNLET_URL_SECRET=...
+```
+
+The full connector URL is:
+
+```text
+<RUNLET_WORKER_URL>/<RUNLET_URL_SECRET>/mcp
+```
+
+Keep it private when copying or displaying it.
+
+## Tune the runner
+
+Common settings in `~/.config/runlet/env`:
+
+```text
+RUNLET_POLL=5
+RUNLET_CMD_TIMEOUT=600
+RUNLET_MAX_OUTPUT=60000
+RUNLET_PARALLEL=1
+RUNLET_BACKGROUND_MAX=4
+RUNLET_DETACH_CHECK=3
+RUNLET_PROGRESS_EVERY=10
+RUNLET_KEEP_DAYS=30
+RUNLET_LOAD_MAX=0
+```
+
+`RUNLET_PARALLEL=1` gives predictable one-at-a-time foreground execution. Background jobs are separately limited by `RUNLET_BACKGROUND_MAX`.
+
+`RUNLET_LOAD_MAX=0` disables load-based admission control. Set it to a positive value to stop Runlet starting new work while the 1-minute load average is above that threshold.
+
+Several tuning values are re-read while the runner is operating, so many operational changes do not require a service restart.
+
+## Troubleshooting
+
+### Commands stay pending
+
+Check the service and log:
+
+```bash
+systemctl --user status runlet
+journalctl --user -u runlet -n 100
+```
+
+A stopped runner, Cloudflare API problem, bad local config, or active load ceiling can leave work pending.
+
+### A command says `rejected`
+
+The runner rejected the signature or nonce. If signing code or keys changed, run:
+
+```bash
+./tests/check-signing.sh
+```
+
+The Worker and runner must use the same HMAC key and byte-for-byte signing format.
+
+### A command says `error` after a restart
+
+Runlet deliberately marks commands that were in flight when the runner restarted as ambiguous. The command may have partly or fully executed before the process disappeared. Inspect its effects before running it again.
+
+### A command timed out
+
+The default command limit is 600 seconds. Increase `RUNLET_CMD_TIMEOUT` if the work is legitimately longer, or use background execution and retrieve the result later.
+
+### The queue is blocked by a long foreground command
+
+Ask the assistant to `detach` it. The command keeps running while later work proceeds. If it should stop instead, use `cancel`.
+
+### The connector URL no longer works
+
+Confirm that the MCP client has the current URL. After rotating `RUNLET_URL_SECRET`, every client using the old URL must be updated.
+
+## Removing Runlet
+
+Stop and disable the local service:
+
+```bash
+systemctl --user disable --now runlet
+```
+
+You can then remove the local config and repository. To remove the cloud side too, delete the Runlet Worker and D1 database from Cloudflare.
+
+Be deliberate when deleting D1: it contains Runlet's command and result history until rows are pruned.

@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS commands (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   command    TEXT    NOT NULL,
-  status     TEXT    NOT NULL,          -- pending | running | done | error | rejected | timeout
+  status     TEXT    NOT NULL,          -- pending | running | done | error | rejected | timeout | cancelled
   output     TEXT,
   exit_code  INTEGER,
   sig        TEXT    NOT NULL,          -- HMAC-SHA256 hex over nonce "\n" command
