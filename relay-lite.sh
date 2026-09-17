@@ -20,6 +20,7 @@
 #     RELAY_CMD_TIMEOUT      seconds a command may run (default 600)
 #     RELAY_MAX_OUTPUT       bytes of output kept (default 60000)
 #     RELAY_PARALLEL         commands run at once (default 1: strictly in order)
+#     RELAY_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
 #
 # RELAY_PARALLEL, RELAY_CMD_TIMEOUT and RELAY_POLL are re-read from the env
 # file every poll: edit the file and the change is live within one interval.
@@ -46,6 +47,11 @@ MAX_OUTPUT="${RELAY_MAX_OUTPUT:-60000}"
 # finish, and jobs compete for the machine. Set it knowingly.
 PARALLEL="${RELAY_PARALLEL:-1}"
 [[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || PARALLEL=1
+# How many rows flagged background=true may run at once, whatever PARALLEL
+# says. They are the assistant's choice per command; this is the owner's
+# ceiling on that choice.
+BACKGROUND_MAX="${RELAY_BACKGROUND_MAX:-4}"
+[[ "$BACKGROUND_MAX" =~ ^[1-9][0-9]*$ ]] || BACKGROUND_MAX=4
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
 
 log() { printf '%s relay-lite: %s\n' "$(date '+%F %T')" "$*" >&2; }
@@ -139,12 +145,20 @@ reload_tunables() {
 poll() {
   local rows
   reload_tunables
-  rows=$(d1 "SELECT id, command, sig, nonce FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
+  rows=$(d1 "SELECT id, command, sig, nonce, COALESCE(background, 0) AS background FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
   local n; n=$(printf '%s' "$rows" | jq 'length')
   (( n > 0 )) || return 0
-  local i
+  local i bg
   for (( i = 0; i < n; i++ )); do
-    if (( PARALLEL > 1 )); then
+    bg=$(jq -r ".[$i].background" <<<"$rows")
+    if [[ "$bg" == 1 ]]; then
+      # Asked to run alongside the queue (run_command background=true). Its
+      # own cap, RELAY_BACKGROUND_MAX, independent of RELAY_PARALLEL: the
+      # queue stays serial while a long job runs beside it.
+      while (( $(jobs -rp | wc -l) >= BACKGROUND_MAX )); do sleep 0.5; done
+      run_one "$(jq -r ".[$i].id" <<<"$rows")" "$(jq -r ".[$i].command" <<<"$rows")" \
+              "$(jq -r ".[$i].sig" <<<"$rows")" "$(jq -r ".[$i].nonce" <<<"$rows")" &
+    elif (( PARALLEL > 1 )); then
       # Hold here while the cap is full. A row another job already claimed
       # while we waited is refused by the claim's status check.
       while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 0.5; done

@@ -64,8 +64,12 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   interleaves. `RELAY_PARALLEL=4` in `~/.config/relay-lite/env` (re-read
   every poll, so it takes effect within seconds, no restart) runs up to
   four at once, each in its own process; results then land in whatever
-  order they finish. A command can also background its own work (`nohup …
-  &`, writing to a log) and return at once; a later command reads the log.
+  order they finish.
+- **Or the assistant chooses, per command.** `run_command` with
+  `background: true` starts that one alongside the queue, so a build or a
+  download does not hold up the quick command after it; the assistant
+  fetches its output later with `get_result` and a `wait`. The owner caps
+  how many such jobs run at once (`RELAY_BACKGROUND_MAX`, default 4).
 
 What it deliberately lacks: a login flow (OAuth), per-client permissions,
 and any record of *which* assistant queued a row. If you need those, the

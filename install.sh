@@ -126,6 +126,14 @@ sed -e "s/__WORKER_NAME__/$WORKER_NAME/" -e "s/__ACCOUNT_ID__/$ACCOUNT_ID/" \
     -e "s/__DB_NAME__/$DB_NAME/" -e "s/__DB_ID__/$DB_ID/" \
     "$HERE/worker/wrangler.jsonc.template" > "$HERE/worker/wrangler.jsonc"
 ( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --file "$HERE/schema.sql" >/dev/null ) || die "applying schema.sql failed"
+# Columns added after the first release, for a database created before
+# them. ALTER TABLE is not idempotent in SQLite, so look first.
+cols=$( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --json --command "PRAGMA table_info(commands);" 2>/dev/null | jq -r '.[0].results[].name' )
+if ! grep -qx background <<<"$cols"; then
+  ( cd "$HERE/worker" && "$WRANGLER" d1 execute "$DB_NAME" --remote --command "ALTER TABLE commands ADD COLUMN background INTEGER NOT NULL DEFAULT 0;" >/dev/null ) \
+    || die "adding the background column failed"
+  note "added the background column"
+fi
 note "schema applied"
 
 # --- 5. secrets --------------------------------------------------------------
@@ -189,8 +197,10 @@ done
 rid=$(jq -r '.result.content[0].text' <<<"$resp" | grep -oE '^#[0-9]+' | tr -d '#')
 [[ -n "$rid" ]] || die "unexpected Worker reply: $resp"
 "$HERE/relay-lite.sh" --once 2>&1 | sed 's/^/    /'
+# get_result with a wait: if a service is already running it may have taken
+# the row before the one-shot poll above, and still be on it.
 got=$(curl -fsS -X POST "$WORKER_URL/$URL_SECRET/mcp" -H 'Content-Type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_result\",\"arguments\":{\"id\":$rid}}}" \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_result\",\"arguments\":{\"id\":$rid,\"wait\":60}}}" \
   | jq -r '.result.content[0].text')
 grep -q 'relay-lite-ok' <<<"$got" || die "smoke test failed; the runner did not produce the result: $got"
 note "queued #$rid, ran it, read the output back: OK"

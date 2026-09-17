@@ -75,10 +75,11 @@ const TOOLS = [
       '- The result starts with "#<id> <status> exit=<code>" then the output. ' +
       'Status done means it ran; check exit= before trusting the output.\n' +
       '- Commands run ONE AT A TIME in the order queued (unless the host set ' +
-      'RELAY_PARALLEL), so a long command holds everything behind it.\n' +
-      '- For anything that may take longer than the wait: pass a short wait, note ' +
-      'the id you get back, and call get_result later. Or background it yourself ' +
-      '(nohup ... > /tmp/job.log 2>&1 &) and read the log with a later command.\n' +
+      'RELAY_PARALLEL), so a long command holds everything behind it -- unless ' +
+      'you pass background=true, which lets that one run alongside the queue.\n' +
+      '- For anything long: pass background=true and a short wait, note the id, ' +
+      'and call get_result with a wait when you want the output. Meanwhile other ' +
+      'commands still run in turn.\n' +
       '- Output over 60 KB is cut; pipe through head, tail or grep instead of ' +
       'dumping large files.\n' +
       '- There is no working directory or shell state between calls: each ' +
@@ -89,6 +90,13 @@ const TOOLS = [
       properties: {
         command: { type: 'string', description: 'The shell command, run with bash -lc from the home directory.' },
         wait: { type: 'number', description: 'Seconds to wait for the result (default 30, max 120). Use 0 to queue and return the id at once.' },
+        background: {
+          type: 'boolean',
+          description:
+            'true: start this command alongside the queue instead of in turn, so it does not ' +
+            'block commands queued after it. For builds, downloads, long scripts. The host caps ' +
+            'how many background jobs run at once (default 4); past the cap it waits.',
+        },
       },
       required: ['command'],
     },
@@ -155,14 +163,17 @@ function clampWait(env: Env, asked: unknown, fallback: number): number {
   return Math.min(Math.max(Number.isFinite(n) ? n : fallback, 0), max)
 }
 
-async function enqueue(env: Env, command: string, waitSeconds: number): Promise<{ row: Row; timedOut: boolean }> {
+// `background` is scheduling advice, not part of what is signed: it changes
+// WHEN the runner starts the row, never what runs, so a forged flag can at
+// most start a signed command sooner.
+async function enqueue(env: Env, command: string, waitSeconds: number, background: boolean): Promise<{ row: Row; timedOut: boolean }> {
   const nonce = randomHex(16)
   const sig = await hmacHex(env.RELAY_HMAC_KEY, `${nonce}\n${command}`)
   const ins = await env.DB.prepare(
-    `INSERT INTO commands (command, status, sig, nonce, created_at, updated_at)
-     VALUES (?, 'pending', ?, ?, datetime('now'), datetime('now'))`,
+    `INSERT INTO commands (command, status, sig, nonce, background, created_at, updated_at)
+     VALUES (?, 'pending', ?, ?, ?, datetime('now'), datetime('now'))`,
   )
-    .bind(command, sig, nonce)
+    .bind(command, sig, nonce, background ? 1 : 0)
     .run()
   const id = Number(ins.meta.last_row_id)
   const r = await awaitRow(env, id, waitSeconds)
@@ -208,7 +219,7 @@ export default {
           if (!command.trim()) return toolText(id, 'run_command needs a command.', true)
           if (command.length > MAX_COMMAND_CHARS) return toolText(id, `Command is ${command.length} characters; the limit is ${MAX_COMMAND_CHARS}.`, true)
           const wait = clampWait(env, args.wait, Number(env.RELAY_WAIT_DEFAULT ?? 30))
-          const r = await enqueue(env, command, wait)
+          const r = await enqueue(env, command, wait, args.background === true)
           return toolText(id, render(r.row, r.timedOut), !r.timedOut && ['error', 'rejected', 'timeout'].includes(r.row.status))
         }
         if (name === 'get_result') {
