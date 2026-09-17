@@ -137,7 +137,8 @@ const TOOLS = [
       'Fetch the status and output of a command queued earlier, by the id run_command ' +
       'returned. Pass `wait` to block up to that many seconds until it finishes, so a ' +
       'long job needs one call rather than a polling loop; without it you get the ' +
-      'current state at once. Status pending or running means it has not finished.',
+      'current state at once. Status pending or running means it has not finished; ' +
+      'a running job shows the output it has produced so far (refreshed every ~10 s).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -158,7 +159,10 @@ interface Row {
 
 function render(row: Row, timedOut: boolean): string {
   const head = `#${row.id} ${row.status}${row.exit_code === null ? '' : ` exit=${row.exit_code}`}`
-  if (timedOut) return `${head}\nStill running after the wait. Call get_result(id=${row.id}) for the output.`
+  if (timedOut) {
+    const partial = row.status === 'running' && row.output ? `\n--- output so far ---\n${row.output}` : ''
+    return `${head}\nStill running after the wait. Call get_result(id=${row.id}, wait=…) for the rest.${partial}`
+  }
   return `${head}\n${row.output ?? ''}`
 }
 

@@ -23,8 +23,11 @@
 #     RELAY_BACKGROUND_MAX   rows sent with background=true running at once (default 4)
 #     RELAY_DETACH_CHECK     seconds between looks for a detach or cancel on a running row (default 3)
 #     RELAY_KEEP_DAYS        finished rows older than this are deleted daily (default 30)
+#     RELAY_PROGRESS_EVERY   seconds between copies of a running job's output onto its row (default 10; 0 = off)
+#     RELAY_LOAD_MAX         hold new commands while the 1-min load average is above this (default 0 = off)
+#     RELAY_RUNNER_ID        this runner's name on the rows it claims (default: hostname)
 #
-# RELAY_PARALLEL, RELAY_CMD_TIMEOUT and RELAY_POLL are re-read from the env
+# Every tunable above (not the token, key or database) is re-read from the env
 # file every poll: edit the file and the change is live within one interval.
 #
 # This is github.com/davidj4tech/tmux-relay's d1-runner with everything that is not "run a command
@@ -57,10 +60,22 @@ BACKGROUND_MAX="${RELAY_BACKGROUND_MAX:-4}"
 # Seconds between looks at whether a running foreground row was detached.
 DETACH_CHECK="${RELAY_DETACH_CHECK:-3}"
 [[ "$DETACH_CHECK" =~ ^[1-9][0-9]*$ ]] || DETACH_CHECK=3
+# Seconds between copies of a running job's output onto its row (0 = never).
+PROGRESS_EVERY="${RELAY_PROGRESS_EVERY:-10}"
+[[ "$PROGRESS_EVERY" =~ ^[0-9]+$ ]] || PROGRESS_EVERY=10
+# Do not START new commands while the 1-minute load average is above this
+# (0 = no ceiling). Running ones are left alone; pending rows wait.
+LOAD_MAX="${RELAY_LOAD_MAX:-0}"
+[[ "$LOAD_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] || LOAD_MAX=0
+# Who claims rows. Written onto the row so the orphan sweep at startup only
+# touches rows THIS runner was running, and two runners on one database
+# cannot sweep each other.
+RUNNER_ID="${RELAY_RUNNER_ID:-$(hostname -s 2>/dev/null || hostname)}"
 # Finished rows older than this many days are deleted, once a day.
 KEEP_DAYS="${RELAY_KEEP_DAYS:-30}"
 [[ "$KEEP_DAYS" =~ ^[1-9][0-9]*$ ]] || KEEP_DAYS=30
 LAST_PRUNE=-100000
+LOAD_HELD=0
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite"
 SEEN="${RELAY_NONCE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/relay-lite/nonces}"
 
@@ -117,7 +132,7 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
   fi
   # Claim it. `AND status = 'pending'` means only one runner can win.
   claimed=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-              --command "UPDATE commands SET status = 'running', updated_at = datetime('now') WHERE id = $id AND status = 'pending';" 2>/dev/null \
+              --command "UPDATE commands SET status = 'running', runner = '$(sql_lit "$RUNNER_ID")', updated_at = datetime('now') WHERE id = $id AND status = 'pending';" 2>/dev/null \
             | jq -r '.[0].meta.changes // 0' 2>/dev/null)
   [[ "$claimed" == 1 ]] || { log "#$id: claimed by someone else"; return; }
   # Append only here: parallel jobs may write at once, and appends are safe
@@ -139,10 +154,22 @@ run_one() {  # $1 = id, $2 = command, $3 = sig, $4 = nonce
 # the foreground hands the watching over to a background copy of this loop
 # and returns, so the queue moves on while the job runs.
 watch_job() {  # $1 = id, $2 = pid of execute_and_write, $3 = fg|bg
-  local id="$1" pid="$2" mode="$3" t=0 flags bg c
+  local id="$1" pid="$2" mode="$3" flags bg c outf="$STATE_DIR/job.$id.out"
+  # Scheduled by the clock, not by loop count: each D1 round trip below costs
+  # seconds, so counting iterations drifted badly (a "10 s" progress write
+  # landed at 30 s on the first try).
+  local start=$SECONDS last_check=$SECONDS last_progress=$SECONDS t
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 1; t=$(( t + 1 ))
-    (( t % DETACH_CHECK == 0 )) || continue
+    sleep 1; t=$(( SECONDS - start ))
+    # Progress: copy what the job has printed so far onto the row, so a
+    # get_result on a running job shows it. One D1 write per interval per
+    # running job; only while the row is still 'running'.
+    if (( PROGRESS_EVERY > 0 && SECONDS - last_progress >= PROGRESS_EVERY )) && [[ -s "$outf" ]]; then
+      last_progress=$SECONDS
+      d1 "UPDATE commands SET output = '$(sql_lit "$(head -c "$MAX_OUTPUT" "$outf")")', updated_at = datetime('now') WHERE id = $id AND status = 'running';" >/dev/null 2>&1
+    fi
+    (( SECONDS - last_check >= DETACH_CHECK )) || continue
+    last_check=$SECONDS
     flags=$(d1 "SELECT COALESCE(background, 0) AS bg, COALESCE(cancel, 0) AS c FROM commands WHERE id = $id;" 2>/dev/null \
             | jq -r '.[0] | "\(.bg) \(.c)"' 2>/dev/null)
     bg="${flags%% *}"; c="${flags##* }"
@@ -216,9 +243,9 @@ prune_old() {
 sweep_orphans() {
   local n
   n=$("$WRANGLER" --config "$WRANGLER_CFG" d1 execute "$DB" --remote --json \
-        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running';" 2>/dev/null \
+        --command "UPDATE commands SET status = 'error', exit_code = -1, output = 'relay-lite: the runner restarted while this was running; the command may or may not have completed', updated_at = datetime('now') WHERE status = 'running' AND (runner = '$(sql_lit "$RUNNER_ID")' OR runner IS NULL);" 2>/dev/null \
       | jq -r '.[0].meta.changes // 0' 2>/dev/null)
-  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n orphaned 'running' row(s) as error"
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && log "marked $n orphaned 'running' row(s) of runner '$RUNNER_ID' as error"
   return 0
 }
 
@@ -235,11 +262,31 @@ reload_tunables() {
   if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$CMD_TIMEOUT" ]]; then log "RELAY_CMD_TIMEOUT now ${v}s (was ${CMD_TIMEOUT}s)"; CMD_TIMEOUT="$v"; fi
   v=$(sed -n 's/^RELAY_POLL=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
   if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$POLL" ]]; then log "RELAY_POLL now ${v}s (was ${POLL}s)"; POLL="$v"; fi
+  v=$(sed -n 's/^RELAY_BACKGROUND_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$BACKGROUND_MAX" ]]; then log "RELAY_BACKGROUND_MAX now $v (was $BACKGROUND_MAX)"; BACKGROUND_MAX="$v"; fi
+  v=$(sed -n 's/^RELAY_PROGRESS_EVERY=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[0-9]+$ && "$v" != "$PROGRESS_EVERY" ]]; then log "RELAY_PROGRESS_EVERY now ${v}s (was ${PROGRESS_EVERY}s)"; PROGRESS_EVERY="$v"; fi
+  v=$(sed -n 's/^RELAY_KEEP_DAYS=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"'')
+  if [[ "$v" =~ ^[1-9][0-9]*$ && "$v" != "$KEEP_DAYS" ]]; then log "RELAY_KEEP_DAYS now $v (was $KEEP_DAYS)"; KEEP_DAYS="$v"; fi
+  # Absent line = ceiling off, so removing it releases a hold.
+  v=$(sed -n 's/^RELAY_LOAD_MAX=//p' "$CONF_DIR/env" | tail -1 | tr -d '[:space:]"'"'"''); [[ -n "$v" ]] || v=0
+  if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ && "$v" != "$LOAD_MAX" ]]; then log "RELAY_LOAD_MAX now $v (was $LOAD_MAX)"; LOAD_MAX="$v"; fi
 }
 
 poll() {
-  local rows
+  local rows load
   reload_tunables
+  if [[ "$LOAD_MAX" != 0 ]]; then
+    load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
+    if awk -v l="$load" -v m="$LOAD_MAX" 'BEGIN { exit !(l > m) }'; then
+      (( LOAD_HELD )) || log "load average $load is over RELAY_LOAD_MAX=$LOAD_MAX — not starting new commands until it drops"
+      LOAD_HELD=1; return 0
+    fi
+    (( LOAD_HELD )) && log "load average $load is back under $LOAD_MAX — resuming"
+    LOAD_HELD=0
+  elif (( LOAD_HELD )); then
+    log "load ceiling removed — resuming"; LOAD_HELD=0
+  fi
   rows=$(d1 "SELECT id, command, sig, nonce, COALESCE(background, 0) AS background FROM commands WHERE status = 'pending' ORDER BY id LIMIT 5;") || return 1
   local n; n=$(printf '%s' "$rows" | jq 'length')
   (( n > 0 )) || return 0

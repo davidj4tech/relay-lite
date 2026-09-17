@@ -78,6 +78,15 @@ Worker and database named `relay-lite-<site>` (default: the hostname). Copy
   is killed with everything it spawned (it runs as its own process group)
   and its status becomes `cancelled`, with whatever output there was. It
   stops; it does not undo.
+- **A running job shows its output so far.** Every `RELAY_PROGRESS_EVERY`
+  seconds (default 10) the runner copies what the job has printed onto the
+  row, so `get_result` on a running command returns the partial output.
+- **A load ceiling, off by default.** `RELAY_LOAD_MAX=4` holds new commands
+  while the 1-minute load average is above 4; running ones are left alone
+  and pending rows wait. Logged when it engages and when it releases.
+- **Each runner signs its name** (hostname, or `RELAY_RUNNER_ID`) on the
+  rows it claims, and the restart sweep only touches its own, so two
+  machines sharing one database cannot mark each other's jobs as failed.
 - **Finished rows are pruned** after `RELAY_KEEP_DAYS` (default 30), once
   a day, so the table does not grow forever. Pending and running rows are
   never touched.
