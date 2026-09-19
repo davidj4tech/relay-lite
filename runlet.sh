@@ -13,6 +13,7 @@
 #     runlet.sh --once     # one poll, for testing
 #     runlet.sh status [n] # the last n rows (default 10), newest first
 #     runlet.sh sign <nonce> <command>   # the signature this runner expects
+#     runlet.sh skills     # the skills listed in RUNLET_SKILLS_DIR
 #
 # Config: ~/.config/runlet/env (written by install.sh):
 #     CLOUDFLARE_API_TOKEN   token for reading and writing D1 (over its HTTP API)
@@ -30,6 +31,7 @@
 #     RUNLET_PROGRESS_EVERY   seconds between copies of a running job's output onto its row (default 10; 0 = off)
 #     RUNLET_LOAD_MAX         hold new commands while the 1-min load average is above this (default 0 = off)
 #     RUNLET_RUNNER_ID        this runner's name on the rows it claims (default: hostname)
+#     RUNLET_SKILLS_DIR       SKILL.md files (or links) that `skills` lists (default skills/ beside env)
 #
 # Every tunable above (not the token, key or database) is re-read from the env
 # file every poll: edit the file and the change is live within one interval.
@@ -40,6 +42,11 @@
 # if you ever want them to.
 
 set -uo pipefail
+
+# Commands inherit this, so `"$RUNLET" skills` works from any of them. A
+# login shell (bash -lc) may reset PATH, but it leaves this alone.
+export RUNLET
+RUNLET=$(readlink -f "${BASH_SOURCE[0]}")
 
 CONF_DIR="${RUNLET_CONF:-$HOME/.config/runlet}"
 if [[ -r "$CONF_DIR/env" ]]; then set -a; . "$CONF_DIR/env"; set +a; fi
@@ -120,6 +127,35 @@ if [[ "${1:-}" == sign ]]; then
   KEY="${RUNLET_KEY:-$(tr -d '[:space:]' < "$KEY_FILE" 2>/dev/null)}"
   [[ -n "$KEY" ]] || { echo "runlet sign: no key (RUNLET_KEY or $KEY_FILE)" >&2; exit 1; }
   printf '%s\n%s' "$2" "$3" | openssl dgst -sha256 -mac HMAC -macopt "key:$KEY" -r 2>/dev/null | cut -d' ' -f1
+  exit 0
+fi
+
+# `skills`: what this machine offers beyond a bare shell, one entry per file
+# in RUNLET_SKILLS_DIR -- a SKILL.md-style file (or a symlink to one, or a
+# directory holding one) whose frontmatter has name: and description:. The
+# assistant runs this first and reads a file in full only when it needs it.
+# The owner curates the directory; nothing is found by scanning the disk.
+if [[ "${1:-}" == skills ]]; then
+  dir="${RUNLET_SKILLS_DIR:-$CONF_DIR/skills}"
+  shopt -s nullglob
+  entries=("$dir"/*)
+  if (( ${#entries[@]} == 0 )); then
+    echo "No skills listed on $(hostname -s 2>/dev/null || hostname). The owner can add one with:"
+    echo "  ln -s /path/to/SKILL.md $dir/<name>.md"
+    exit 0
+  fi
+  echo "Skills on $(hostname -s 2>/dev/null || hostname). Read one in full (cat the path) before using it."
+  for e in "${entries[@]}"; do
+    f=$(readlink -f "$e"); [[ -d "$f" ]] && f="$f/SKILL.md"
+    [[ -r "$f" ]] || { echo; echo "$(basename "$e"): unreadable ($f)"; continue; }
+    # Only the frontmatter: the block between a first-line --- and the next.
+    fm=$(awk 'NR == 1 && !/^---[[:space:]]*$/ { exit } NR > 1 && /^---[[:space:]]*$/ { exit } NR > 1' "$f")
+    name=$(sed -n 's/^name:[[:space:]]*//p' <<<"$fm" | head -1)
+    desc=$(sed -n 's/^description:[[:space:]]*//p' <<<"$fm" | head -1)
+    [[ -n "$name" ]] || { name=$(basename "$e"); name="${name%.md}"; }
+    [[ -n "$desc" ]] || desc=$(grep -m1 -v '^\(---\|#\|[[:space:]]*$\)' "$f")
+    printf '\n%s: %s\n  %s\n' "$name" "$desc" "$f"
+  done
   exit 0
 fi
 

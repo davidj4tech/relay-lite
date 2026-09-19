@@ -51,6 +51,16 @@ If a foreground command turns out to be slow, `detach` lets it keep running whil
 
 Each command starts in a fresh `bash -lc` shell. Shell state, including the working directory, does not persist between calls, so use `cd` in the command when needed.
 
+## Skills
+
+A shell alone does not tell an assistant what is worth running. List the tools you have set up on the machine, one file per tool, in `~/.config/runlet/skills/`:
+
+```bash
+ln -s ~/projects/agent-mail/skills/agent-mail/SKILL.md ~/.config/runlet/skills/agent-mail.md
+```
+
+Each entry is a Markdown file, a symlink to one, or a directory containing a `SKILL.md`. Its frontmatter should give a `name:` and a `description:`. The `run_command` description tells the assistant to start with `"$RUNLET" skills`. That command prints each skill's name, its description and the path to read before using it. The runner sets `$RUNLET` for every command it runs. Nothing is found by scanning the disk: a tool is listed only when you put it in this directory.
+
 ## How it works
 
 1. The MCP client calls the Worker through a secret URL.

@@ -79,6 +79,9 @@ const TOOLS = [
       'to `wait` seconds for the result. Anything you send here RUNS on a real ' +
       "machine: prefer read-only commands unless the user asked for a change, and " +
       'never run something destructive on a guess.\n\n' +
+      'Start with `"$RUNLET" skills`: it lists the tools the owner has set up on ' +
+      'this machine (messaging, services, project helpers), each with a file to ' +
+      'read before using it. Check it before assuming something is not there.\n\n' +
       'How to operate it:\n' +
       '- The result starts with "#<id> <status> exit=<code>" then the output. ' +
       'Status done means it ran; check exit= before trusting the output.\n' +
