@@ -180,7 +180,13 @@ The old path stops being valid after the Worker is redeployed with the new secre
 
 ## Find a lost connector URL
 
-The components are stored in `~/.config/runlet/env`:
+Print it from the install folder:
+
+```sh
+./install.sh --print-url
+```
+
+This only reads `~/.config/runlet/env`; it needs no token and changes nothing. The components are stored there:
 
 ```text
 RUNLET_WORKER_URL=...

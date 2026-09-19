@@ -5,6 +5,7 @@
 #     ./install.sh                 # interactive: asks for the token if not in env
 #     CLOUDFLARE_API_TOKEN=... ./install.sh
 #     ./install.sh --no-service    # everything except starting the runner
+#     ./install.sh --print-url     # print this machine's connector URL and exit
 #
 # The ONE manual step is the token. Create it at
 #   https://dash.cloudflare.com/profile/api-tokens  ->  Create Token  ->  Custom
@@ -30,6 +31,18 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 CONF="$HOME/.config/runlet"
 NO_SERVICE=0
 [[ "${1:-}" == "--no-service" ]] && NO_SERVICE=1
+
+# --print-url: rebuild the connector URL from the env file an earlier run
+# wrote, and nothing else -- no token, no network, no redeploy. The bare URL
+# on stdout, so it can be piped (e.g. into wl-copy).
+if [[ "${1:-}" == "--print-url" ]]; then
+  [[ -r "$CONF/env" ]] || { echo "no $CONF/env: run ./install.sh first" >&2; exit 1; }
+  url=$(sed -n 's/^RUNLET_WORKER_URL=//p' "$CONF/env" | tail -1)
+  sec=$(sed -n 's/^RUNLET_URL_SECRET=//p' "$CONF/env" | tail -1)
+  [[ -n "$url" && -n "$sec" ]] || { echo "$CONF/env lacks RUNLET_WORKER_URL or RUNLET_URL_SECRET: re-run ./install.sh" >&2; exit 1; }
+  printf '%s/%s/mcp\n' "$url" "$sec"
+  exit 0
+fi
 
 # install.conf beside this script, if present, answers the questions in
 # advance so the person running it types nothing: CLOUDFLARE_API_TOKEN,
