@@ -59,7 +59,7 @@ A shell alone does not tell an assistant what is worth running. List the tools y
 ln -s ~/projects/agent-mail/skills/agent-mail/SKILL.md ~/.config/runlet/skills/agent-mail.md
 ```
 
-Each entry is a Markdown file, a symlink to one, or a directory containing a `SKILL.md`. Its frontmatter should give a `name:` and a `description:`. The `run_command` description tells the assistant to start with `"$RUNLET" skills`. That command prints each skill's name, its description and the path to read before using it. The runner sets `$RUNLET` for every command it runs. Nothing is found by scanning the disk: a tool is listed only when you put it in this directory.
+Each entry is a Markdown file, a symlink to one, or a directory containing a `SKILL.md`. Its frontmatter should give a `name:` and a `description:`. The `run_command` description tells the assistant to start with `runlet skills`. `install.sh` links `runlet` into `~/.local/bin`, and `runlet --help` points there too. That command prints each skill's name, its description and the path to read before using it. Where `~/.local/bin` is not on the login-shell `PATH`, `"$RUNLET" skills` works instead: the runner sets `$RUNLET` for every command it runs. Nothing is found by scanning the disk: a tool is listed only when you put it in this directory.
 
 ## How it works
 

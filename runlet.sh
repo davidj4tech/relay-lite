@@ -14,6 +14,7 @@
 #     runlet.sh status [n] # the last n rows (default 10), newest first
 #     runlet.sh sign <nonce> <command>   # the signature this runner expects
 #     runlet.sh skills     # the skills listed in RUNLET_SKILLS_DIR
+#     runlet.sh --help     # the above, for a person or an assistant
 #
 # Config: ~/.config/runlet/env (written by install.sh):
 #     CLOUDFLARE_API_TOKEN   token for reading and writing D1 (over its HTTP API)
@@ -44,7 +45,9 @@
 set -uo pipefail
 
 # Commands inherit this, so `"$RUNLET" skills` works from any of them. A
-# login shell (bash -lc) may reset PATH, but it leaves this alone.
+# login shell (bash -lc) may reset PATH, but it leaves this alone. Already
+# set means this copy was started BY a command the runner is running.
+IN_JOB=0; [[ -n "${RUNLET:-}" ]] && IN_JOB=1
 export RUNLET
 RUNLET=$(readlink -f "${BASH_SOURCE[0]}")
 
@@ -115,6 +118,32 @@ log() {
   fi
   printf '%s\n' "$line" >&2
 }
+
+usage() {
+  cat <<EOF
+runlet: run signed shell commands queued by an assistant, on this machine.
+
+  runlet skills        the tools the owner has set up here, and where to read about each
+  runlet status [n]    the last n commands (default 10), newest first
+  runlet --once        one poll of the queue, for testing
+  runlet               poll forever (what the service runs)
+  runlet sign <nonce> <command>   the signature this runner expects
+
+Assistant? Start with \`runlet skills\`. If runlet is not on PATH, \`"\$RUNLET" skills\`
+works from any command the runner starts.
+EOF
+}
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+  ''|--once|status|sign|skills) ;;
+  *) echo "runlet: unknown command '$1'" >&2; usage >&2; exit 2 ;;
+esac
+# A command the runner is running must not become a second runner: bare
+# `runlet` would poll the queue until the timeout killed it, taking rows.
+if (( IN_JOB )) && [[ -z "${1:-}" || "$1" == --once ]]; then
+  echo "runlet: already running this command; it does not poll from inside a job" >&2
+  usage >&2; exit 2
+fi
 
 for dep in jq openssl timeout; do
   command -v "$dep" >/dev/null 2>&1 || { log "missing dependency: $dep"; exit 1; }

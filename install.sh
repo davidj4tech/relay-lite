@@ -219,6 +219,10 @@ RUNLET_CMD_TIMEOUT=600
 EOF
 chmod 600 "$CONF/env"
 chmod +x "$HERE/runlet.sh"
+# `runlet` on PATH, so `runlet --help` is there to find: ~/.local/bin is on
+# the login-shell PATH of most distros, and commands run under bash -lc.
+mkdir -p "$HOME/.local/bin" "$CONF/skills"
+ln -sfn "$HERE/runlet.sh" "$HOME/.local/bin/runlet"
 
 # --- 8. smoke test: queue a row the way the Worker does, run it once ---------
 say "Smoke test"
@@ -313,7 +317,8 @@ cat <<EOF
     Then ask Claude to run a command, e.g. "run uname -a on my machine".
 
     Runner log:  journalctl --user -u runlet -f
-    Status:      $HERE/runlet.sh status
+    Status:      runlet status        (runlet --help for the rest)
+    Skills:      link SKILL.md files into $CONF/skills/ for assistants to find
     Config:      $CONF/env   (token, secret, URL)   $CONF/relay.key
     Re-run this script any time; it keeps existing keys and ids.
 EOF
